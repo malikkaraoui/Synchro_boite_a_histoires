@@ -42,13 +42,57 @@ jobs:
       - name: Build .app
         run: pyinstaller lunii-app.spec --noconfirm
 
-      - name: ZIP l'app
-        run: cd dist && zip -r LuniiSync-macOS.zip LuniiSync.app
+      - name: Importer le certificat Developer ID
+        run: |
+          echo "$APPLE_CERT_P12" | base64 --decode > cert.p12
+          security create-keychain -p "ci-keychain" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "ci-keychain" build.keychain
+          security import cert.p12 -k build.keychain -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "ci-keychain" build.keychain
+          rm cert.p12
+        env:
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+
+      - name: Signer le .app
+        run: |
+          codesign --deep --force --options runtime \
+            --sign "Developer ID Application: Malik Karaoui (UPES5479T5)" \
+            --entitlements lunii-app.entitlements \
+            dist/LuniiSync.app
+
+      - name: Créer le DMG
+        run: |
+          brew install create-dmg
+          create-dmg \
+            --volname "LuniiSync" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "LuniiSync.app" 150 185 \
+            --hide-extension "LuniiSync.app" \
+            --app-drop-link 450 185 \
+            "dist/LuniiSync-macOS.dmg" \
+            "dist/LuniiSync.app"
+
+      - name: Notariser le DMG
+        run: |
+          xcrun notarytool submit dist/LuniiSync-macOS.dmg \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple dist/LuniiSync-macOS.dmg
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       - uses: actions/upload-artifact@v4
         with:
           name: LuniiSync-macOS
-          path: dist/LuniiSync-macOS.zip
+          path: dist/LuniiSync-macOS.dmg
 
   # ── Windows ────────────────────────────────────────────────────────────────
   build-windows:
@@ -135,9 +179,7 @@ jobs:
             ### Téléchargements
 
             - **Windows** : `LuniiSync-Windows.zip` → extraire le dossier → double-cliquer `LuniiSync.exe`
-            - **macOS** : `LuniiSync-macOS.zip` → extraire → double-cliquer `LuniiSync.app`
-
-            > macOS : si bloqué, clic droit → Ouvrir → Ouvrir quand même.
+            - **macOS** : `LuniiSync-macOS.dmg` → ouvrir → glisser dans Applications → lancer
           files: |
             artifacts/LuniiSync-Windows/LuniiSync-Windows.zip
-            artifacts/LuniiSync-macOS/LuniiSync-macOS.zip
+            artifacts/LuniiSync-macOS/LuniiSync-macOS.dmg
