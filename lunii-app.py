@@ -361,7 +361,6 @@ class SyncWorker(QObject):
 
         errors = []
         for i, af in enumerate(to_import):
-            self.progress.emit(i, len(to_import))
             self.log.emit(f"[{i+1}/{len(to_import)}] {af.name}")
             with tempfile.TemporaryDirectory() as tmp:
                 try:
@@ -375,6 +374,7 @@ class SyncWorker(QObject):
                 except Exception as e:
                     errors.append(af.name)
                     self.log.emit(f"  ✗ {e}")
+            self.progress.emit(i + 1, len(to_import))
 
         self.progress.emit(len(to_import), len(to_import))
         device.update_pack_index()
@@ -499,12 +499,13 @@ class MainWindow(QMainWindow):
         self._worker = SyncWorker(self._lunii_path, self._audio_dir)
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
+        Q = Qt.ConnectionType.QueuedConnection
         self._thread.started.connect(self._worker.run)
-        self._worker.log.connect(self._append)
+        self._worker.log.connect(self._append, Q)
         self._worker.progress.connect(lambda d, t: (
-            self._bar.__setattr__("maximum", max(t, 1)) or self._bar.setValue(d)))
-        self._worker.finished.connect(self._on_done)
-        self._worker.finished.connect(self._thread.quit)
+            self._bar.__setattr__("maximum", max(t, 1)) or self._bar.setValue(d)), Q)
+        self._worker.finished.connect(self._on_done, Q)
+        self._worker.finished.connect(self._thread.quit, Q)
         self._thread.start()
 
     def _on_done(self, ok: bool, summary: str):
@@ -512,6 +513,15 @@ class MainWindow(QMainWindow):
         self._sync_btn.setEnabled(True)
         self._folder_btn.setEnabled(True)
         self._append(f"\n{'✅' if ok else '⚠️'}  {summary}")
+        def _show_result():
+            box = QMessageBox(self)
+            box.setWindowTitle("Synchronisation terminée")
+            icon = QMessageBox.Icon.Information if ok else QMessageBox.Icon.Warning
+            box.setIcon(icon)
+            label = "✅  Synchronisation réussie !" if ok else "⚠️  Synchronisation avec erreurs"
+            box.setText(f"{label}\n\n{summary}")
+            box.open()
+        QTimer.singleShot(0, _show_result)
 
 
 # ── 7. Point d'entrée ─────────────────────────────────────────────────────────
