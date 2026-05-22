@@ -255,8 +255,43 @@ def _import_one(device, audio_path: Path, work_dir: Path) -> bool:
         return False
 
 
+# ── Réparation index ──────────────────────────────────────────────────────────
+def _repair_index(device_mount: Path) -> None:
+    """Recrée le fichier .pi à partir du contenu de .content/"""
+    if not device_mount.is_dir():
+        emit("error", message=f"Montage Lunii introuvable : {device_mount}")
+        sys.exit(1)
+
+    _bootstrap_lunii_qt()
+    sys.path.insert(0, str(LUNII_QT_DIR))
+    try:
+        try:
+            from PySide6.QtCore import QCoreApplication  # type: ignore
+        except ImportError:
+            from PyQt6.QtCore import QCoreApplication    # type: ignore
+        if QCoreApplication.instance() is None:
+            _q_app = QCoreApplication(sys.argv[:1])
+        from pkg.api.device_lunii import LuniiDevice  # type: ignore
+    except ImportError as exc:
+        emit("error", message=f"Import Lunii.QT échoué : {exc}")
+        sys.exit(1)
+
+    try:
+        device = LuniiDevice(str(device_mount))
+        device.update_pack_index()
+        emit("done", added=0, errors=0, message="Index réparé — redémarre la Lunii.")
+    except Exception as exc:
+        emit("error", message=f"Réparation échouée : {exc}")
+        sys.exit(1)
+
+
 # ── Point d'entrée ────────────────────────────────────────────────────────────
 def main() -> None:
+    # Mode réparation d'index
+    if len(sys.argv) >= 3 and sys.argv[1] == "--repair-index":
+        _repair_index(Path(sys.argv[2]))
+        return
+
     if len(sys.argv) < 3:
         emit("error", message=f"Usage: {sys.argv[0]} <audio_folder> <device_mount>")
         sys.exit(1)

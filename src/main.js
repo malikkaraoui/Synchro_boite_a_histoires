@@ -3,7 +3,7 @@ const { invoke } = window.__TAURI__.core;
 const { open }   = window.__TAURI__.dialog;
 const { listen } = window.__TAURI__.event;
 
-const APP_VERSION = "2.1.1";
+const APP_VERSION = "2.1.2";
 // URL de vérification des mises à jour (GitHub releases API)
 
 // ── État ──────────────────────────────────────────────────────────────────────
@@ -46,6 +46,7 @@ const $syncDoneScreen  = document.getElementById("sync-done-screen");
 const $syncDoneDetail  = document.getElementById("sync-done-detail");
 const RING_CIRC        = 326.7; // 2 * π * 52
 const $ejectBtn        = document.getElementById("eject-btn");
+const $repairBtn       = document.getElementById("repair-btn");
 const $deviceFwLabel   = document.getElementById("device-fw-label");
 const $namingModal     = document.getElementById("naming-modal");
 const $namingInput     = document.getElementById("naming-input");
@@ -307,6 +308,7 @@ async function pollDevice() {
       $devicePath.textContent = probe.mount;
       $devicePath.classList.remove("hidden");
       $ejectBtn.classList.remove("hidden");
+      $repairBtn.classList.remove("hidden");
       // Affiche le nom ou propose d'en donner un
       if (deviceId) {
         // Migration : purger toutes les vieilles entrées UUID dès qu'une entrée serial existe
@@ -359,6 +361,7 @@ async function pollDevice() {
       $deviceBadge.textContent = "Non connectée";
       $devicePath.classList.add("hidden");
       $ejectBtn.classList.add("hidden");
+      $repairBtn.classList.add("hidden");
       $storageWrap.classList.add("hidden");
       $deviceHeader.style.display = "none";
       $deviceList.replaceChildren($deviceEmpty);
@@ -786,6 +789,24 @@ $ejectBtn.addEventListener("click", async () => {
   } catch (e) {
     log("err", `Éjection échouée : ${e}`);
     $logDrawer.classList.remove("hidden");
+  }
+});
+
+// ── Réparation index ──────────────────────────────────────────────────────────
+$repairBtn.addEventListener("click", async () => {
+  if (!deviceMount || syncing) return;
+  $repairBtn.disabled = true;
+  $repairBtn.title = "Réparation en cours…";
+  log("ok", "Réparation de l'index en cours…");
+  $logDrawer.classList.remove("hidden");
+  try {
+    await invoke("repair_pack_index", { deviceMount });
+    log("ok", "Index réparé — redémarre la Lunii pour voir les histoires.");
+  } catch (e) {
+    log("err", `Réparation échouée : ${e}`);
+  } finally {
+    $repairBtn.disabled = false;
+    $repairBtn.title = "Réparer l'index de la boîte";
   }
 });
 

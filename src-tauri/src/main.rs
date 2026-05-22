@@ -235,6 +235,44 @@ async fn start_sync(
     }
 }
 
+/// Répare le fichier d'index (.pi) de la Lunii via --repair-index dans le bridge Python.
+#[tauri::command]
+async fn repair_pack_index(
+    app: tauri::AppHandle,
+    device_mount: String,
+) -> Result<String, String> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::process::Command;
+
+    let bridge_path = locate_bridge(&app)?;
+    let python = locate_python3();
+
+    let mut child = Command::new(&python)
+        .arg(&bridge_path)
+        .arg("--repair-index")
+        .arg(&device_mount)
+        .env("PATH", "/Library/Frameworks/Python.framework/Versions/3.13/bin:/Library/Frameworks/Python.framework/Versions/3.12/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Impossible de lancer lunii-bridge.py : {e}"))?;
+
+    let stdout = child.stdout.take().expect("stdout");
+    let app2 = app.clone();
+    let stdout_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            let _ = app2.emit("sync:line", &line);
+        }
+    });
+
+    let status = child.wait().await.map_err(|e| format!("Attente échouée : {e}"))?;
+    let _ = stdout_task.await;
+
+    if status.success() { Ok("ok".to_string()) }
+    else { Err(format!("Réparation échouée (code {})", status.code().unwrap_or(-1))) }
+}
+
 /// Retourne le chemin du python3 qui a PySide6 installé (évite /usr/bin/python3 système 3.9).
 fn locate_python3() -> String {
     let candidates = [
@@ -415,6 +453,7 @@ fn main() {
             check_for_update,
             open_release_page,
             download_and_install_update,
+            repair_pack_index,
         ])
         .run(tauri::generate_context!())
         .expect("Erreur au démarrage de LuniiSync");
