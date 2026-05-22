@@ -2,6 +2,7 @@
   <img src="src/logo.png" width="120" alt="LuniiSync Logo"/>
   <h1>LuniiSync</h1>
   <p><strong>Transférez vos histoires audio sur  "Ma Fabrique à Histoires" — facilement, sans abonnement.</strong></p>
+  <p><em>La conteuse mobile pour vos histoires et podcasts préférés... et bien plus !</em></p>
   <p>
     <img src="https://img.shields.io/badge/version-2.0.0-00b49e?style=flat-square"/>
     <img src="https://img.shields.io/badge/plateforme-macOS-lightgrey?style=flat-square&logo=apple"/>
