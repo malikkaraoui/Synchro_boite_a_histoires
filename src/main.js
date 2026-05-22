@@ -3,7 +3,7 @@ const { invoke } = window.__TAURI__.core;
 const { open }   = window.__TAURI__.dialog;
 const { listen } = window.__TAURI__.event;
 
-const APP_VERSION = "2.1.4";
+const APP_VERSION = "2.1.5";
 // URL de vérification des mises à jour (GitHub releases API)
 
 // ── État ──────────────────────────────────────────────────────────────────────
@@ -748,6 +748,10 @@ function handleBridgeMsg(msg) {
           _importLines.set(msg.current, el);
         }
         showSyncStatus(`⏳ ${name}`, msg.current, msg.total);
+      } else if (msg.step === "index") {
+        const isOk = msg.message.startsWith("✓");
+        log(isOk ? "ok" : "warn", msg.message);
+        if (isOk) showSyncStatus(msg.message);
       } else if (msg.step === "setup") {
         const label = msg.message.includes("Clon") ? "⬇ Clonage Lunii.QT…"
                     : msg.message.includes("Téléch") ? "⬇ Téléchargement studio-pack-generator…"

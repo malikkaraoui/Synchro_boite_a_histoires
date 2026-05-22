@@ -381,17 +381,35 @@ def main() -> None:
             else:
                 errors += 1
 
-    # ── Mise à jour index ─────────────────────────────────────────────────────
-    try:
-        device.update_pack_index()
-    except OSError as exc:
-        import errno as _errno
-        if exc.errno == _errno.EIO:
-            emit("error", message="Boîte éjectée pendant la synchronisation — rebranchez et relancez.")
-        else:
-            emit("error", message=f"update_pack_index échoué : {exc}")
-    except Exception as exc:
-        emit("error", message=f"update_pack_index échoué : {exc}")
+    # ── Mise à jour index (3 tentatives) ─────────────────────────────────────
+    import time as _time
+    import errno as _errno
+
+    index_ok = False
+    for attempt in range(3):
+        try:
+            device.update_pack_index()
+            index_ok = True
+            emit("progress", step="index",
+                 message=f"✓ Index boîte mis à jour ({added} histoire(s) enregistrée(s)).")
+            break
+        except OSError as exc:
+            if exc.errno == _errno.EIO:
+                if attempt < 2:
+                    emit("progress", step="index",
+                         message=f"⚠ Tentative {attempt + 2}/3 mise à jour index…")
+                    _time.sleep(1.5)
+                    continue
+                emit("error", message="⚠ Index non mis à jour (boîte trop lente) — appuyez sur 🔧 dans l'app.")
+            else:
+                emit("error", message=f"⚠ Index échoué : {exc} — appuyez sur 🔧 dans l'app.")
+            break
+        except Exception as exc:
+            emit("error", message=f"⚠ Index non mis à jour : {exc} — appuyez sur 🔧 dans l'app.")
+            break
+
+    if not index_ok:
+        errors += 1
 
     emit("done", added=added, errors=errors,
          message=f"Terminé : {added} ajouté(s), {errors} erreur(s).")
