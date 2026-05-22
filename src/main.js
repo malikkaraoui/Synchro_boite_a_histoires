@@ -3,9 +3,9 @@ const { invoke } = window.__TAURI__.core;
 const { open }   = window.__TAURI__.dialog;
 const { listen } = window.__TAURI__.event;
 
-const APP_VERSION = "2.0.1";
+const APP_VERSION = "2.0.0";
 // URL de vérification des mises à jour (GitHub releases API)
-const UPDATE_URL  = "https://api.github.com/repos/karaoui-malik/luniisync/releases/latest";
+const UPDATE_URL  = "https://api.github.com/repos/malikkaraoui/Lunii_Synchro/releases/latest";
 
 // ── État ──────────────────────────────────────────────────────────────────────
 let deviceMount   = null;
