@@ -3,7 +3,7 @@ const { invoke } = window.__TAURI__.core;
 const { open }   = window.__TAURI__.dialog;
 const { listen } = window.__TAURI__.event;
 
-const APP_VERSION = "2.0.5";
+const APP_VERSION = "2.0.6";
 // URL de vérification des mises à jour (GitHub releases API)
 
 // ── État ──────────────────────────────────────────────────────────────────────
@@ -633,7 +633,7 @@ function showSyncDone(added, errors) {
 }
 
 async function startSync() {
-  if (!deviceMount || pendingIds.size === 0 || syncing) return;
+  if (!deviceMount || (pendingIds.size === 0 && pendingDeletes.size === 0) || syncing) return;
 
   // Construire la liste des fichiers sélectionnés (peut être vide si suppressions seules)
   const selectedAudio = audioFiles.filter(a => pendingIds.has(a.storyId));
