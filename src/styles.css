@@ -319,9 +319,9 @@ h2.device-named { font-size: 18px; font-weight: 800; color: var(--text); text-tr
   user-select: none;
 }
 .log-output {
-  max-height: 120px; overflow-y: auto;
-  padding: 4px 18px 10px;
-  font-family: ui-monospace, monospace; font-size: 11px; line-height: 1.7;
+  max-height: 90px; overflow-y: auto;
+  padding: 4px 14px 8px;
+  font-family: ui-monospace, monospace; font-size: 11px; line-height: 1.6;
 }
 .log-output::-webkit-scrollbar { width: 4px; }
 .log-output::-webkit-scrollbar-thumb { background: #3d4166; }

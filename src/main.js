@@ -3,7 +3,7 @@ const { invoke } = window.__TAURI__.core;
 const { open }   = window.__TAURI__.dialog;
 const { listen } = window.__TAURI__.event;
 
-const APP_VERSION = "2.1.3";
+const APP_VERSION = "2.1.4";
 // URL de vérification des mises à jour (GitHub releases API)
 
 // ── État ──────────────────────────────────────────────────────────────────────
@@ -669,6 +669,7 @@ async function startSync() {
   $syncBtn.disabled = true;
   $syncBtn.classList.add("syncing");
   $syncBtn.querySelector(".btn-icon").textContent = "⟳";
+  _importLines.clear();
   $logDrawer.classList.remove("hidden");
   $logOutput.replaceChildren();
   showSyncStatus("Démarrage de la synchronisation…");
@@ -704,6 +705,8 @@ async function startSync() {
     pendingDeletes.clear();
     showSyncStatus("Mise à jour de l'inventaire…");
     await pollDevice();
+    hideSyncStatus();
+    log("ok", "✓ Inventaire mis à jour.");
     if (audioFiles.length > 0) renderFolderList();
     if (selectedFiles.length === 0 && deleted > 0) {
       showSyncDone(0, 0, deleted);
@@ -721,28 +724,41 @@ async function startSync() {
   }
 }
 
-const STEP_LABELS = {
-  setup:  (m) => m.includes("Clon") ? "⬇ Clonage Lunii.QT…"
-               : m.includes("Téléchargement") ? "⬇ Téléchargement studio-pack-generator…"
-               : m.includes("prêt") ? "✓ Dépendances prêtes"
-               : `⚙ ${m}`,
-  scan:   (m) => `🔍 ${m}`,
-  import: (m, msg) => msg.current != null
-               ? `📦 [${msg.current}/${msg.total}] ${msg.file || m}`
-               : `📦 ${m}`,
-};
+// _importLines : map index → élément DOM pour mise à jour en place
+const _importLines = new Map();
 
 function handleBridgeMsg(msg) {
   switch (msg.type) {
     case "progress": {
-      const label = STEP_LABELS[msg.step]
-        ? STEP_LABELS[msg.step](msg.message, msg)
-        : msg.message;
-      log("info", label);
       if (msg.step === "import" && msg.current != null) {
-        showSyncStatus(`📦 ${msg.file || "Traitement…"}`, msg.current, msg.total);
+        const isSuccess = msg.message.startsWith("✓");
+        const name = msg.file || msg.message;
+        if (isSuccess) {
+          // Mise à jour de la ligne existante → ✓ vert
+          const el = _importLines.get(msg.current);
+          if (el) {
+            el.className = "log-ok";
+            el.textContent = el.textContent.replace(/^(\[[^\]]+\]) ⏳/, `$1 ✓`);
+          } else {
+            log("ok", `[${msg.current}/${msg.total}] ✓ ${name}`);
+          }
+        } else {
+          // Nouvelle ligne ⏳ en cours
+          const el = logLine("info", `[${msg.current}/${msg.total}] ⏳ En cours : ${name}`);
+          _importLines.set(msg.current, el);
+        }
+        showSyncStatus(`⏳ ${name}`, msg.current, msg.total);
       } else if (msg.step === "setup") {
-        showSyncStatus(label.replace(/^[^ ]+ /, ""));
+        const label = msg.message.includes("Clon") ? "⬇ Clonage Lunii.QT…"
+                    : msg.message.includes("Téléch") ? "⬇ Téléchargement studio-pack-generator…"
+                    : msg.message.includes("prêt") ? "✓ Dépendances prêtes"
+                    : `⚙ ${msg.message}`;
+        log(msg.message.includes("prêt") ? "ok" : "info", label);
+        showSyncStatus(label);
+      } else if (msg.step === "scan") {
+        log("info", `🔍 ${msg.message}`);
+      } else {
+        log("info", msg.message);
       }
       break;
     }
@@ -751,6 +767,7 @@ function handleBridgeMsg(msg) {
       doneErrors++;
       break;
     case "done":
+      _importLines.clear();
       log("ok", `✓ Terminé : ${msg.added ?? 0} ajouté(s), ${msg.errors ?? 0} erreur(s).`);
       showSyncDone(msg.added ?? 0, msg.errors ?? 0, doneDeleted);
       break;
@@ -762,19 +779,23 @@ function handleBridgeMsg(msg) {
   }
 }
 
-// ── Journal ───────────────────────────────────────────────────────────────────
-$logToggle.addEventListener("click", () => {
-  $logOutput.style.display = $logOutput.style.display === "none" ? "" : "none";
-});
-
-function log(level, text) {
+// Crée une ligne de log et la retourne (pour mise à jour en place)
+function logLine(level, text) {
   const ts = new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const line = document.createElement("div");
   line.className = `log-${level}`;
   line.textContent = `[${ts}] ${text}`;
   $logOutput.appendChild(line);
   $logOutput.scrollTop = $logOutput.scrollHeight;
+  return line;
 }
+
+// ── Journal ───────────────────────────────────────────────────────────────────
+$logToggle.addEventListener("click", () => {
+  $logOutput.style.display = $logOutput.style.display === "none" ? "" : "none";
+});
+
+function log(level, text) { logLine(level, text); }
 
 // ── Éjection ──────────────────────────────────────────────────────────────────
 $ejectBtn.addEventListener("click", async () => {
