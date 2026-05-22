@@ -3,7 +3,7 @@ const { invoke } = window.__TAURI__.core;
 const { open }   = window.__TAURI__.dialog;
 const { listen } = window.__TAURI__.event;
 
-const APP_VERSION = "2.0.2";
+const APP_VERSION = "2.0.3";
 // URL de vérification des mises à jour (GitHub releases API)
 
 // ── État ──────────────────────────────────────────────────────────────────────
@@ -70,9 +70,14 @@ function initial(name) {
 
 // ── Splash screen ─────────────────────────────────────────────────────────────
 async function runSplash() {
-  const $splash = document.getElementById("splash");
-  const $bar    = document.getElementById("splash-progress-fill");
-  const $label  = document.getElementById("splash-update-label");
+  const $splash   = document.getElementById("splash");
+  const $bar      = document.getElementById("splash-progress-fill");
+  const $label    = document.getElementById("splash-update-label");
+  const $splashV  = document.getElementById("splash-version");
+  const $settingsV = document.getElementById("settings-version");
+
+  if ($splashV)  $splashV.textContent  = `v${APP_VERSION}`;
+  if ($settingsV) $settingsV.textContent = APP_VERSION;
 
   // Progression fake + vrai check update en parallèle
   let pct = 0;
