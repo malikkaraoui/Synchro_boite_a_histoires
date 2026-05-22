@@ -70,6 +70,15 @@ fn remove_orphan_story(mount: String, short_uuid: String) -> Result<(), String> 
     lunii_sync::remove_orphan_story(&mount, &short_uuid)
 }
 
+#[tauri::command]
+fn move_story_in_pack_index(
+    mount: String,
+    short_uuid: String,
+    direction: i32,
+) -> Result<(), String> {
+    lunii_device::move_story_in_pack_index(&mount, &short_uuid, direction)
+}
+
 // ── Réglages persistants ──────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -444,6 +453,7 @@ fn main() {
             scan_and_plan,
             write_sidecar_after_push,
             remove_orphan_story,
+            move_story_in_pack_index,
             get_app_settings,
             save_device_name,
             save_last_folder,

@@ -15,6 +15,7 @@ let audioFiles    = [];       // AudioFile[]
 let pendingIds     = new Set(); // story_id en attente de sync
 let pendingDeletes = new Set(); // short_uuid en attente de suppression
 let syncing        = false;
+let reordering     = false;
 
 // ── DOM ───────────────────────────────────────────────────────────────────────
 const $deviceBadge     = document.getElementById("device-badge");
@@ -293,7 +294,7 @@ function openRenameModal(id) {
 
 // ── Polling device (3s) ───────────────────────────────────────────────────────
 async function pollDevice() {
-  if (syncing) return;
+  if (syncing || reordering) return;
   try {
     const probe = await invoke("probe_lunii_device");
     if (probe.connected && probe.mount) {
@@ -391,7 +392,7 @@ function renderDeviceList() {
   const frag = document.createDocumentFragment();
   frag.appendChild($deviceEmpty);  // garder en DOM mais caché
 
-  for (const s of deviceStories) {
+  for (const [idx, s] of deviceStories.entries()) {
     const hasName = !!s.title;
     const displayName = s.title || s.shortUuid;
     const row = document.createElement("div");
@@ -430,6 +431,27 @@ function renderDeviceList() {
     sz.textContent = fmtSize(s.sizeBytes || 0);
     row.appendChild(sz);
 
+    const actions = document.createElement("div");
+    actions.className = "story-actions";
+
+    const upBtn = document.createElement("button");
+    upBtn.className = "btn-move";
+    upBtn.textContent = "↑";
+    upBtn.title = "Monter dans l'ordre de la boîte";
+    upBtn.disabled = syncing || reordering || idx === 0;
+    upBtn.addEventListener("click", () => moveStory(s.shortUuid, -1));
+    actions.appendChild(upBtn);
+
+    const downBtn = document.createElement("button");
+    downBtn.className = "btn-move";
+    downBtn.textContent = "↓";
+    downBtn.title = "Descendre dans l'ordre de la boîte";
+    downBtn.disabled = syncing || reordering || idx === deviceStories.length - 1;
+    downBtn.addEventListener("click", () => moveStory(s.shortUuid, 1));
+    actions.appendChild(downBtn);
+
+    row.appendChild(actions);
+
     // Bouton supprimer
     const delBtn = document.createElement("button");
     const isMarked = pendingDeletes.has(s.shortUuid);
@@ -444,6 +466,30 @@ function renderDeviceList() {
   }
 
   $deviceList.replaceChildren(frag);
+}
+
+async function moveStory(shortUuid, direction) {
+  if (!deviceMount || syncing || reordering) return;
+
+  const currentIdx = deviceStories.findIndex(s => s.shortUuid === shortUuid);
+  const targetIdx = currentIdx + direction;
+  if (currentIdx < 0 || targetIdx < 0 || targetIdx >= deviceStories.length) return;
+
+  reordering = true;
+  renderDeviceList();
+
+  try {
+    await invoke("move_story_in_pack_index", { mount: deviceMount, shortUuid, direction });
+    const [story] = deviceStories.splice(currentIdx, 1);
+    deviceStories.splice(targetIdx, 0, story);
+    renderDeviceList();
+    showToast("Ordre des histoires mis à jour ✓", "ok", 2200);
+  } catch (e) {
+    showToast(`Ordre inchangé : ${e}`, "warn", 3500);
+  } finally {
+    reordering = false;
+    renderDeviceList();
+  }
 }
 
 // ── Suppression stories ───────────────────────────────────────────────────────

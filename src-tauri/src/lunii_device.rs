@@ -3,6 +3,7 @@
 //! + ajout du fallback détection par nom de volume.
 
 use serde::Serialize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -236,6 +237,75 @@ fn dir_size_bytes(path: &Path) -> u64 {
             .sum(),
         Err(_) => 0,
     }
+}
+
+fn short_uuid_from_uuid_bytes(uuid_bytes: &[u8; 16]) -> String {
+    uuid_bytes[12..]
+        .iter()
+        .map(|b| format!("{:02X}", b))
+        .collect()
+}
+
+fn read_pack_index_entries(index_path: &Path) -> Result<Vec<[u8; 16]>, String> {
+    let data = fs::read(index_path)
+        .map_err(|e| format!("Lecture {:?} échouée : {e}", index_path))?;
+
+    if data.len() % 16 != 0 {
+        return Err(format!("Index {:?} corrompu : taille invalide", index_path));
+    }
+
+    Ok(data
+        .chunks_exact(16)
+        .map(|chunk| {
+            let mut uuid = [0u8; 16];
+            uuid.copy_from_slice(chunk);
+            uuid
+        })
+        .collect())
+}
+
+fn write_pack_index_entries(index_path: &Path, entries: &[[u8; 16]]) -> Result<(), String> {
+    let mut out = Vec::with_capacity(entries.len() * 16);
+    for entry in entries {
+        out.extend_from_slice(entry);
+    }
+    fs::write(index_path, out).map_err(|e| format!("Écriture {:?} échouée : {e}", index_path))
+}
+
+pub fn move_story_in_pack_index(mount: &str, short_uuid: &str, direction: i32) -> Result<(), String> {
+    if direction == 0 {
+        return Ok(());
+    }
+
+    let index_path = Path::new(mount).join(".pi");
+    if !index_path.is_file() {
+        return Err("Index .pi introuvable sur la boîte".to_string());
+    }
+
+    let mut entries = read_pack_index_entries(&index_path)?;
+    if entries.is_empty() {
+        return Err("Index .pi vide".to_string());
+    }
+
+    let wanted = short_uuid.to_uppercase();
+    let idx = entries
+        .iter()
+        .position(|entry| short_uuid_from_uuid_bytes(entry) == wanted)
+        .ok_or_else(|| format!("Histoire introuvable dans l'index : {wanted}"))?;
+
+    let target_idx = if direction < 0 {
+        idx.checked_sub(1)
+            .ok_or_else(|| "Cette histoire est déjà en première position".to_string())?
+    } else {
+        let next = idx + 1;
+        if next >= entries.len() {
+            return Err("Cette histoire est déjà en dernière position".to_string());
+        }
+        next
+    };
+
+    entries.swap(idx, target_idx);
+    write_pack_index_entries(&index_path, &entries)
 }
 
 fn count_story_dirs(content_dir: &Path) -> usize {
@@ -545,12 +615,26 @@ pub fn read_inventory(mount: &Path) -> Option<LuniiInventory> {
         return None;
     }
 
+    let order_map: HashMap<String, usize> = read_pack_index_entries(&mount.join(".pi"))
+        .ok()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .map(|(idx, entry)| (short_uuid_from_uuid_bytes(&entry), idx))
+        .collect();
+
     let mut dir_entries: Vec<_> = fs::read_dir(&content_dir)
         .ok()?
         .filter_map(Result::ok)
         .filter(|e| e.path().is_dir())
         .collect();
-    dir_entries.sort_by_key(|e| e.path());
+    dir_entries.sort_by(|a, b| {
+        let a_short = a.file_name().to_string_lossy().to_uppercase().to_string();
+        let b_short = b.file_name().to_string_lossy().to_uppercase().to_string();
+        let a_idx = order_map.get(&a_short).copied().unwrap_or(usize::MAX);
+        let b_idx = order_map.get(&b_short).copied().unwrap_or(usize::MAX);
+        a_idx.cmp(&b_idx).then_with(|| a.path().cmp(&b.path()))
+    });
 
     let stories: Vec<LuniiStoryEntry> = dir_entries
         .iter()
@@ -631,8 +715,9 @@ pub fn get_lunii_inventory() -> LuniiInventoryResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_story, probe_root, read_inventory, read_sidecar, LuniiDeviceProbe,
-        LuniiStoryEntry, SidecarData, StoryDeviceStatus,
+        compare_story, move_story_in_pack_index, probe_root, read_inventory, read_sidecar,
+        write_pack_index_entries, LuniiDeviceProbe, LuniiStoryEntry, SidecarData,
+        StoryDeviceStatus,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -746,6 +831,47 @@ mod tests {
         let sc = inv.stories[0].sidecar.as_ref().expect("sidecar");
         assert_eq!(sc.story_id, "abc-123");
         assert_eq!(sc.hash, "sha256:deadbeef");
+    }
+
+    #[test]
+    fn inventory_respects_pack_index_order() {
+        let root = TempDir::new("lunii-inv-order");
+        let mount = root.path().join("LUNII");
+        fs::create_dir_all(mount.join(".content").join("AABBCCDD")).unwrap();
+        fs::create_dir_all(mount.join(".content").join("11223344")).unwrap();
+
+        let mut first = [0u8; 16];
+        first[12..].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+        let mut second = [0u8; 16];
+        second[12..].copy_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        write_pack_index_entries(&mount.join(".pi"), &[first, second]).unwrap();
+
+        let inv = read_inventory(&mount).expect("inventory");
+        let ordered: Vec<_> = inv.stories.iter().map(|s| s.short_uuid.as_str()).collect();
+        assert_eq!(ordered, vec!["11223344", "AABBCCDD"]);
+    }
+
+    #[test]
+    fn move_story_updates_pack_index_order() {
+        let root = TempDir::new("lunii-move-order");
+        let mount = root.path().join("LUNII");
+        fs::create_dir_all(&mount).unwrap();
+
+        let mut first = [0u8; 16];
+        first[12..].copy_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        let mut second = [0u8; 16];
+        second[12..].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+        let pi_path = mount.join(".pi");
+        write_pack_index_entries(&pi_path, &[first, second]).unwrap();
+
+        move_story_in_pack_index(&mount.to_string_lossy(), "11223344", -1).unwrap();
+
+        let entries = super::read_pack_index_entries(&pi_path).unwrap();
+        let ordered: Vec<_> = entries
+            .iter()
+            .map(super::short_uuid_from_uuid_bytes)
+            .collect();
+        assert_eq!(ordered, vec!["11223344", "AABBCCDD"]);
     }
 
     #[test]

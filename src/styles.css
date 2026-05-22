@@ -205,6 +205,22 @@ h2.device-named { font-size: 18px; font-weight: 800; color: var(--text); text-tr
 .story-name-uuid { font-family: ui-monospace, monospace; font-size: 11px; font-weight: 500; color: var(--sub); letter-spacing: .3px; }
 .story-meta { font-size: 11px; color: var(--muted); margin-top: 1px; }
 .story-size { font-size: 11px; color: var(--sub); flex-shrink: 0; }
+.story-actions {
+  display: flex; align-items: center; gap: 4px; flex-shrink: 0;
+}
+.btn-move {
+  width: 24px; height: 24px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--bg);
+  color: var(--sub); font-size: 12px; line-height: 1;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.btn-move:hover:not(:disabled) {
+  background: #eef6ff; color: var(--blue); border-color: #bfd3ff;
+}
+.btn-move:disabled {
+  opacity: .35; cursor: not-allowed;
+}
 
 /* ── Audio row (dossier) ───────────────────────────────────────────────────── */
 .audio-row {
