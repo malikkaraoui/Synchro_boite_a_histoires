@@ -3,7 +3,7 @@ const { invoke } = window.__TAURI__.core;
 const { open }   = window.__TAURI__.dialog;
 const { listen } = window.__TAURI__.event;
 
-const APP_VERSION = "2.0.6";
+const APP_VERSION = "2.0.7";
 // URL de vérification des mises à jour (GitHub releases API)
 
 // ── État ──────────────────────────────────────────────────────────────────────
@@ -309,6 +309,20 @@ async function pollDevice() {
       $ejectBtn.classList.remove("hidden");
       // Affiche le nom ou propose d'en donner un
       if (deviceId) {
+        // Migration automatique : si serial-ID inconnu, hériter le nom de l'ancienne entrée UUID
+        if (deviceId.startsWith("serial-") && !deviceName(deviceId)) {
+          const devices = appSettings.devices || {};
+          const oldEntry = Object.entries(devices).find(([id, info]) =>
+            !id.startsWith("serial-") && info && info.name
+          );
+          if (oldEntry) {
+            appSettings.devices[deviceId] = { name: oldEntry[1].name, lastFolder: oldEntry[1].lastFolder || "" };
+            for (const [id] of Object.entries(devices)) {
+              if (!id.startsWith("serial-")) delete appSettings.devices[id];
+            }
+            await invoke("save_device_name", { deviceId, name: oldEntry[1].name });
+          }
+        }
         renderDeviceName(deviceId);
         if (!deviceName(deviceId)) showNamingModal(deviceId);
       }
@@ -619,17 +633,24 @@ function updateRing(current, total) {
   $syncCountN.classList.add("pop");
 }
 
-function showSyncDone(added, errors) {
+function showSyncDone(added, errors, deleted = 0) {
+  $syncOverlay.classList.remove("hidden");
   $syncDoneScreen.classList.remove("hidden");
   $syncCountN.closest(".sync-ring-wrap").style.opacity = "0";
-  $syncDoneDetail.textContent =
-    `${added} histoire${added !== 1 ? "s" : ""} ajoutée${added !== 1 ? "s" : ""}`
-    + (errors > 0 ? ` · ${errors} erreur${errors !== 1 ? "s" : ""}` : "");
-  // Fermeture auto après 2,5 s
+
+  const parts = [];
+  if (added > 0)   parts.push(`${added} histoire${added > 1 ? "s" : ""} ajoutée${added > 1 ? "s" : ""} ✓`);
+  if (deleted > 0) parts.push(`${deleted} histoire${deleted > 1 ? "s" : ""} supprimée${deleted > 1 ? "s" : ""} ✓`);
+  if (errors > 0)  parts.push(`${errors} erreur${errors > 1 ? "s" : ""}`);
+  if (parts.length === 0) parts.push("Synchronisation terminée ✓");
+
+  $syncDoneDetail.textContent = parts.join("  ·  ");
+
   setTimeout(() => {
     $syncOverlay.classList.add("hidden");
+    $syncDoneScreen.classList.add("hidden");
     $syncCountN.closest(".sync-ring-wrap").style.opacity = "";
-  }, 2500);
+  }, 3500);
 }
 
 async function startSync() {
@@ -655,6 +676,7 @@ async function startSync() {
 
   // Suppressions d'abord
   let deleted = 0;
+  let doneDeleted = 0;
   for (const uuid of toDelete) {
     try {
       await invoke("remove_orphan_story", { mount: deviceMount, shortUuid: uuid });
@@ -664,6 +686,7 @@ async function startSync() {
       log("err", `Suppression ${uuid} échouée : ${e}`);
     }
   }
+  doneDeleted = deleted;
   if (deleted > 0) log("info", `${deleted} histoire(s) supprimée(s).`);
 
   const unlisten = await listen("sync:line", ({ payload }) => {
@@ -683,7 +706,7 @@ async function startSync() {
     if (audioFiles.length > 0) renderFolderList();
     // Écran succès si seulement suppressions (sans transfert)
     if (selectedFiles.length === 0 && deleted > 0) {
-      showSyncDone(0, 0);
+      showSyncDone(0, 0, deleted);
     }
   } catch (e) {
     log("err", `Erreur : ${e}`);
@@ -711,7 +734,7 @@ function handleBridgeMsg(msg) {
       break;
     case "done":
       log("ok", `✓ ${msg.added ?? 0} ajouté(s), ${msg.errors ?? 0} erreur(s).`);
-      showSyncDone(msg.added ?? 0, msg.errors ?? 0);
+      showSyncDone(msg.added ?? 0, msg.errors ?? 0, doneDeleted);
       break;
     case "stderr":
       log("warn", msg.message);
