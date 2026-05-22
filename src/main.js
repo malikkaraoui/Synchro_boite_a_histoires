@@ -3,7 +3,7 @@ const { invoke } = window.__TAURI__.core;
 const { open }   = window.__TAURI__.dialog;
 const { listen } = window.__TAURI__.event;
 
-const APP_VERSION = "2.0.3";
+const APP_VERSION = "2.0.4";
 // URL de vérification des mises à jour (GitHub releases API)
 
 // ── État ──────────────────────────────────────────────────────────────────────
@@ -79,10 +79,11 @@ async function runSplash() {
   if ($splashV)  $splashV.textContent  = `v${APP_VERSION}`;
   if ($settingsV) $settingsV.textContent = APP_VERSION;
 
-  // Progression fake + vrai check update en parallèle
+  // Progression fake + vrai check update en parallèle (minimum 5s d'affichage)
+  const splashStart = Date.now();
   let pct = 0;
   const tick = setInterval(() => {
-    pct = Math.min(pct + 8, 85);
+    pct = Math.min(pct + 3, 85);
     $bar.style.width = pct + "%";
   }, 120);
 
@@ -111,7 +112,9 @@ async function runSplash() {
 
   clearInterval(tick);
   $bar.style.width = "100%";
-  await new Promise(r => setTimeout(r, 600));
+  const elapsed = Date.now() - splashStart;
+  const remaining = Math.max(0, 5000 - elapsed);
+  await new Promise(r => setTimeout(r, remaining + 400));
   $splash.classList.add("fade-out");
   await new Promise(r => setTimeout(r, 400));
   $splash.remove();
