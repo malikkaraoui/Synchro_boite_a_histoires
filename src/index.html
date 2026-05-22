@@ -115,35 +115,23 @@
 
   </main>
 
-  <!-- ── Overlay animation synchronisation ──────────────────────────── -->
-  <div id="sync-overlay" class="sync-overlay hidden">
-    <div class="sync-card">
-      <div class="sync-ring-wrap">
-        <svg class="sync-ring-svg" viewBox="0 0 120 120">
-          <circle class="sync-ring-bg"  cx="60" cy="60" r="52"/>
-          <circle class="sync-ring-arc" cx="60" cy="60" r="52" id="sync-ring-arc"/>
-        </svg>
-        <div class="sync-ring-center">
-          <div id="sync-count-current" class="sync-count-n">0</div>
-          <div id="sync-count-total"   class="sync-count-d">/ 0</div>
-        </div>
-      </div>
-      <div class="sync-card-label">Synchronisation en cours</div>
-      <div id="sync-file-name" class="sync-file-name">Démarrage…</div>
-      <div class="sync-dots"><span></span><span></span><span></span></div>
-      <div id="sync-done-screen" class="sync-done-screen hidden">
-        <div class="sync-done-icon">✓</div>
-        <div class="sync-done-title">Transfert terminé !</div>
-        <div id="sync-done-detail" class="sync-done-detail"></div>
-      </div>
+  <!-- ── Barre de statut sync (inline) ─────────────────────────────── -->
+  <div id="sync-status-bar" class="sync-status-bar hidden">
+    <div class="sync-status-left">
+      <div id="sync-status-spinner" class="sync-spinner"></div>
+      <div id="sync-status-text" class="sync-status-text">Synchronisation…</div>
     </div>
+    <div id="sync-status-count" class="sync-status-count"></div>
   </div>
 
-  <!-- ── Journal ─────────────────────────────────────────────────────── -->
+  <!-- ── Journal / log sync ──────────────────────────────────────────── -->
   <div id="log-drawer" class="log-drawer hidden">
     <div class="log-drawer-handle" id="log-toggle">Journal ▾</div>
     <div id="log-output" class="log-output"></div>
   </div>
+
+  <!-- ── Toast résultat ──────────────────────────────────────────────── -->
+  <div id="sync-toast" class="sync-toast hidden"></div>
 
 </div>
 

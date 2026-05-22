@@ -3,7 +3,7 @@ const { invoke } = window.__TAURI__.core;
 const { open }   = window.__TAURI__.dialog;
 const { listen } = window.__TAURI__.event;
 
-const APP_VERSION = "2.1.2";
+const APP_VERSION = "2.1.3";
 // URL de vérification des mises à jour (GitHub releases API)
 
 // ── État ──────────────────────────────────────────────────────────────────────
@@ -37,14 +37,10 @@ const $folderHeader    = document.getElementById("folder-list-header");
 const $folderCount     = document.getElementById("folder-file-count");
 const $addAllBtn       = document.getElementById("add-all-btn");
 const $removeAllBtn    = document.getElementById("remove-all-btn");
-const $syncOverlay     = document.getElementById("sync-overlay");
-const $syncRingArc     = document.getElementById("sync-ring-arc");
-const $syncCountN      = document.getElementById("sync-count-current");
-const $syncCountD      = document.getElementById("sync-count-total");
-const $syncFileName    = document.getElementById("sync-file-name");
-const $syncDoneScreen  = document.getElementById("sync-done-screen");
-const $syncDoneDetail  = document.getElementById("sync-done-detail");
-const RING_CIRC        = 326.7; // 2 * π * 52
+const $syncStatusBar   = document.getElementById("sync-status-bar");
+const $syncStatusText  = document.getElementById("sync-status-text");
+const $syncStatusCount = document.getElementById("sync-status-count");
+const $syncToast       = document.getElementById("sync-toast");
 const $ejectBtn        = document.getElementById("eject-btn");
 const $repairBtn       = document.getElementById("repair-btn");
 const $deviceFwLabel   = document.getElementById("device-fw-label");
@@ -623,41 +619,38 @@ function updateSyncButton() {
 
 $syncBtn.addEventListener("click", startSync);
 
-// ── Helpers overlay ───────────────────────────────────────────────────────────
-function showSyncOverlay(total) {
-  $syncDoneScreen.classList.add("hidden");
-  $syncOverlay.classList.remove("hidden");
-  $syncCountD.textContent = `/ ${total}`;
-  updateRing(0, total);
+// ── Helpers sync status ───────────────────────────────────────────────────────
+let _syncTotal = 0;
+
+function showSyncStatus(text, current = 0, total = 0) {
+  _syncTotal = total;
+  $syncStatusText.textContent = text;
+  $syncStatusCount.textContent = total > 0 ? `${current} / ${total}` : "";
+  $syncStatusBar.classList.remove("hidden");
 }
 
-function updateRing(current, total) {
-  const pct = total > 0 ? current / total : 0;
-  $syncRingArc.style.strokeDashoffset = (RING_CIRC * (1 - pct)).toFixed(2);
-  $syncCountN.textContent = String(current);
-  $syncCountN.classList.remove("pop");
-  void $syncCountN.offsetWidth;  // reflow pour relancer l'animation
-  $syncCountN.classList.add("pop");
+function hideSyncStatus() {
+  $syncStatusBar.classList.add("hidden");
+  $syncStatusCount.textContent = "";
+}
+
+let _toastTimer = null;
+function showToast(msg, kind = "ok", durationMs = 4000) {
+  if (_toastTimer) clearTimeout(_toastTimer);
+  $syncToast.textContent = msg;
+  $syncToast.className = `sync-toast toast-${kind}`;
+  $syncToast.classList.remove("hidden");
+  _toastTimer = setTimeout(() => $syncToast.classList.add("hidden"), durationMs);
 }
 
 function showSyncDone(added, errors, deleted = 0) {
-  $syncOverlay.classList.remove("hidden");
-  $syncDoneScreen.classList.remove("hidden");
-  $syncCountN.closest(".sync-ring-wrap").style.opacity = "0";
-
+  hideSyncStatus();
   const parts = [];
   if (added > 0)   parts.push(`${added} histoire${added > 1 ? "s" : ""} ajoutée${added > 1 ? "s" : ""} ✓`);
   if (deleted > 0) parts.push(`${deleted} histoire${deleted > 1 ? "s" : ""} supprimée${deleted > 1 ? "s" : ""} ✓`);
-  if (errors > 0)  parts.push(`${errors} erreur${errors > 1 ? "s" : ""}`);
+  if (errors > 0)  parts.push(`${errors} erreur${errors > 1 ? "s" : ""} ✗`);
   if (parts.length === 0) parts.push("Synchronisation terminée ✓");
-
-  $syncDoneDetail.textContent = parts.join("  ·  ");
-
-  setTimeout(() => {
-    $syncOverlay.classList.add("hidden");
-    $syncDoneScreen.classList.add("hidden");
-    $syncCountN.closest(".sync-ring-wrap").style.opacity = "";
-  }, 3500);
+  showToast(parts.join("  ·  "), errors > 0 ? "warn" : "ok", 5000);
 }
 
 async function startSync() {
@@ -676,10 +669,10 @@ async function startSync() {
   $syncBtn.disabled = true;
   $syncBtn.classList.add("syncing");
   $syncBtn.querySelector(".btn-icon").textContent = "⟳";
-  if (totalFiles > 0) showSyncOverlay(totalFiles);
   $logDrawer.classList.remove("hidden");
   $logOutput.replaceChildren();
-  log("info", "Démarrage de la synchronisation…");
+  showSyncStatus("Démarrage de la synchronisation…");
+  log("info", "⏳ Démarrage de la synchronisation…");
 
   // Suppressions d'abord
   let deleted = 0;
@@ -704,20 +697,21 @@ async function startSync() {
   let doneAdded = deleted, doneErrors = 0;
   try {
     if (selectedFiles.length > 0) {
+      showSyncStatus("Transfert en cours…", 0, totalFiles);
       await invoke("start_sync", { folderPath, deviceMount, selectedFiles });
-      log("ok", "Synchronisation terminée avec succès.");
     }
     pendingIds.clear();
     pendingDeletes.clear();
+    showSyncStatus("Mise à jour de l'inventaire…");
     await pollDevice();
     if (audioFiles.length > 0) renderFolderList();
-    // Écran succès si seulement suppressions (sans transfert)
     if (selectedFiles.length === 0 && deleted > 0) {
       showSyncDone(0, 0, deleted);
     }
   } catch (e) {
     log("err", `Erreur : ${e}`);
-    $syncOverlay.classList.add("hidden");
+    hideSyncStatus();
+    showToast(`Erreur : ${e}`, "err", 6000);
   } finally {
     unlisten();
     syncing = false;
@@ -727,24 +721,41 @@ async function startSync() {
   }
 }
 
+const STEP_LABELS = {
+  setup:  (m) => m.includes("Clon") ? "⬇ Clonage Lunii.QT…"
+               : m.includes("Téléchargement") ? "⬇ Téléchargement studio-pack-generator…"
+               : m.includes("prêt") ? "✓ Dépendances prêtes"
+               : `⚙ ${m}`,
+  scan:   (m) => `🔍 ${m}`,
+  import: (m, msg) => msg.current != null
+               ? `📦 [${msg.current}/${msg.total}] ${msg.file || m}`
+               : `📦 ${m}`,
+};
+
 function handleBridgeMsg(msg) {
   switch (msg.type) {
-    case "progress":
-      log("info", msg.message);
-      if (msg.step === "import" && msg.current != null && msg.total != null) {
-        updateRing(msg.current, msg.total);
-        if (msg.file) $syncFileName.textContent = msg.file;
+    case "progress": {
+      const label = STEP_LABELS[msg.step]
+        ? STEP_LABELS[msg.step](msg.message, msg)
+        : msg.message;
+      log("info", label);
+      if (msg.step === "import" && msg.current != null) {
+        showSyncStatus(`📦 ${msg.file || "Traitement…"}`, msg.current, msg.total);
+      } else if (msg.step === "setup") {
+        showSyncStatus(label.replace(/^[^ ]+ /, ""));
       }
       break;
+    }
     case "error":
-      log("err", msg.message || JSON.stringify(msg));
+      log("err", `✗ ${msg.message || JSON.stringify(msg)}`);
+      doneErrors++;
       break;
     case "done":
-      log("ok", `✓ ${msg.added ?? 0} ajouté(s), ${msg.errors ?? 0} erreur(s).`);
+      log("ok", `✓ Terminé : ${msg.added ?? 0} ajouté(s), ${msg.errors ?? 0} erreur(s).`);
       showSyncDone(msg.added ?? 0, msg.errors ?? 0, doneDeleted);
       break;
     case "stderr":
-      log("warn", msg.message);
+      if (msg.message && !msg.message.startsWith("QStandardPaths")) log("warn", msg.message);
       break;
     default:
       log("info", JSON.stringify(msg));
