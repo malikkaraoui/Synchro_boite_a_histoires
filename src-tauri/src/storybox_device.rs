@@ -392,9 +392,14 @@ fn sorted_child_dirs(root: &Path) -> Vec<PathBuf> {
 }
 
 fn probe_mount_candidate(path: &Path) -> Option<StoryBoxDeviceProbe> {
-    // Méthode 1 : fichier marqueur `.md` à la racine (boîte à histoires officiel)
-    if path.join(".md").exists() {
-        return Some(StoryBoxDeviceProbe::connected(path.to_path_buf(), "marker", true));
+    // Méthode 1 : fichier marqueur `.md` à la racine — doit être ≥ 64 octets (binaire device,
+    // jamais un fichier markdown texte) pour éviter les faux positifs sur volumes quelconques.
+    let md_path = path.join(".md");
+    if md_path.exists() {
+        let size = std::fs::metadata(&md_path).map(|m| m.len()).unwrap_or(0);
+        if size >= 64 {
+            return Some(StoryBoxDeviceProbe::connected(path.to_path_buf(), "marker", true));
+        }
     }
 
     // Méthode 2 : nom de volume contient "STORYBOX" (fallback macOS/Windows)
@@ -819,7 +824,7 @@ mod tests {
         let mount = root.path().join("STORYBOX");
         fs::create_dir_all(mount.join(".content").join("A1B2C3D4")).unwrap();
         fs::create_dir_all(mount.join(".content").join("E5F6G7H8")).unwrap();
-        fs::write(mount.join(".md"), b"marker").unwrap();
+        fs::write(mount.join(".md"), vec![0xABu8; 512]).unwrap();
 
         let probe = connected_probe(root.path());
         assert!(probe.connected);
@@ -847,6 +852,17 @@ mod tests {
     fn probe_root_ignores_unrelated_volumes() {
         let root = TempDir::new("storybox-probe-ignore");
         fs::create_dir_all(root.path().join("Macintosh HD")).unwrap();
+        assert_eq!(probe_root(root.path(), 0), None);
+    }
+
+    #[test]
+    fn probe_root_ignores_small_md_false_positive() {
+        // Un volume quelconque avec un fichier .md texte (< 64 octets) ne doit PAS être détecté.
+        // Cas réel : DMG de l'app nommé "LuniiSync" ou volume avec un README .md.
+        let root = TempDir::new("storybox-probe-small-md");
+        let mount = root.path().join("SomeVolume");
+        fs::create_dir_all(&mount).unwrap();
+        fs::write(mount.join(".md"), b"# README").unwrap();
         assert_eq!(probe_root(root.path(), 0), None);
     }
 
