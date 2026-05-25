@@ -3,10 +3,14 @@
 mod app_settings;
 mod lunii_device;
 mod lunii_sync;
+mod studio_story;
+mod story_pack;
 
 use lunii_device::{LuniiDeviceInfo, LuniiDeviceProbe, LuniiInventoryResult, StoryCompareResult};
 use lunii_sync::{AudioFile, StorageInfo, SyncPlan};
+#[cfg(not(feature = "mac-app-store"))]
 use std::path::PathBuf;
+#[cfg(not(feature = "mac-app-store"))]
 use tauri::{Emitter, Manager};
 
 // ── Commandes device ──────────────────────────────────────────────────────────
@@ -92,9 +96,7 @@ fn reorder_story_in_pack_index(
 
 #[tauri::command]
 fn get_app_settings(app: tauri::AppHandle) -> app_settings::AppSettings {
-    let settings = app_settings::load(&app);
-    let _ = app_settings::save(&app, &settings);
-    settings
+    app_settings::load(&app)
 }
 
 #[tauri::command]
@@ -103,19 +105,9 @@ fn save_device_name(
     device_id: String,
     name: String,
 ) -> Result<(), String> {
-    let name = name.trim().to_string();
-    if name.is_empty() {
-        return app_settings::delete_device(&app, &device_id).map_err(|e| e.to_string());
-    }
-
     let mut settings = app_settings::load(&app);
     settings.devices.insert(device_id, app_settings::DeviceInfo { name });
     app_settings::save(&app, &settings).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn purge_legacy_device_entries(app: tauri::AppHandle) -> Result<usize, String> {
-    app_settings::purge_legacy_devices(&app).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -125,6 +117,7 @@ fn save_last_folder(app: tauri::AppHandle, folder: String) -> Result<(), String>
     app_settings::save(&app, &settings).map_err(|e| e.to_string())
 }
 
+#[cfg(not(feature = "mac-app-store"))]
 fn bridge_path_env() -> Option<String> {
     #[cfg(target_os = "macos")]
     {
@@ -136,6 +129,7 @@ fn bridge_path_env() -> Option<String> {
     }
 }
 
+#[cfg(not(feature = "mac-app-store"))]
 fn command_available(command: &str) -> bool {
     std::process::Command::new(command)
         .arg("--version")
@@ -224,6 +218,17 @@ async fn start_sync(
     device_mount: String,
     selected_files: Vec<String>,
 ) -> Result<String, String> {
+    #[cfg(feature = "mac-app-store")]
+    {
+        let _ = (app, folder_path, device_mount, selected_files);
+        return Err(
+            "L’import audio n’est pas encore disponible dans cette variante Mac App Store."
+                .to_string(),
+        );
+    }
+
+    #[cfg(not(feature = "mac-app-store"))]
+    {
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::process::Command;
 
@@ -287,6 +292,7 @@ async fn start_sync(
             status.code().unwrap_or(-1)
         ))
     }
+    }
 }
 
 /// Répare le fichier d'index (.pi) de la Lunii via --repair-index dans le bridge Python.
@@ -295,6 +301,15 @@ async fn repair_pack_index(
     app: tauri::AppHandle,
     device_mount: String,
 ) -> Result<String, String> {
+    #[cfg(feature = "mac-app-store")]
+    {
+        let _ = app;
+        lunii_device::repair_pack_index_native(&device_mount)?;
+        return Ok("ok".to_string());
+    }
+
+    #[cfg(not(feature = "mac-app-store"))]
+    {
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::process::Command;
 
@@ -331,9 +346,11 @@ async fn repair_pack_index(
 
     if status.success() { Ok("ok".to_string()) }
     else { Err(format!("Réparation échouée (code {})", status.code().unwrap_or(-1))) }
+    }
 }
 
 /// Retourne la commande Python disponible selon la plateforme.
+#[cfg(not(feature = "mac-app-store"))]
 fn locate_python3() -> String {
     #[cfg(target_os = "windows")]
     let candidates = ["py", "python", "python3"];
@@ -368,6 +385,7 @@ fn locate_python3() -> String {
 }
 
 /// Localise `lunii-bridge.py` dans le bundle (Resources/) ou en dev (racine projet).
+#[cfg(not(feature = "mac-app-store"))]
 fn locate_bridge(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     if let Ok(res_dir) = app.path().resource_dir() {
         // Tauri bundle : Resources/lunii-bridge.py
@@ -391,13 +409,33 @@ fn locate_bridge(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 
 // ── Vérification mise à jour ──────────────────────────────────────────────────
 
+#[cfg(not(feature = "mac-app-store"))]
 const GITHUB_RELEASE_URL: &str =
     "https://api.github.com/repos/malikkaraoui/Lunii_Synchro/releases/latest";
+#[cfg(not(feature = "mac-app-store"))]
 const GITHUB_RELEASES_PAGE: &str =
     "https://github.com/malikkaraoui/Lunii_Synchro/releases/latest";
 
+const BUILD_DISTRIBUTION_CHANNEL: &str = if cfg!(feature = "mac-app-store") {
+    "mac-app-store"
+} else {
+    "direct"
+};
+
+#[tauri::command]
+fn get_distribution_channel() -> String {
+    BUILD_DISTRIBUTION_CHANNEL.to_string()
+}
+
 #[tauri::command]
 async fn check_for_update() -> Result<String, String> {
+    #[cfg(feature = "mac-app-store")]
+    {
+        return Ok(env!("CARGO_PKG_VERSION").to_string());
+    }
+
+    #[cfg(not(feature = "mac-app-store"))]
+    {
     let client = reqwest::Client::builder()
         .user_agent("LuniiSync/2.0")
         .timeout(std::time::Duration::from_secs(8))
@@ -419,15 +457,32 @@ async fn check_for_update() -> Result<String, String> {
         .and_then(|v| v.as_str())
         .map(|s| s.trim_start_matches('v').to_string())
         .ok_or_else(|| "tag_name absent de la réponse".to_string())
+    }
 }
 
 #[tauri::command]
 fn open_release_page() -> Result<(), String> {
+    #[cfg(feature = "mac-app-store")]
+    {
+        return Err("Cette version se met à jour via le Mac App Store.".to_string());
+    }
+
+    #[cfg(not(feature = "mac-app-store"))]
+    {
     open::that(GITHUB_RELEASES_PAGE).map_err(|e| format!("Impossible d'ouvrir le navigateur : {e}"))
+    }
 }
 
 #[tauri::command]
 async fn download_and_install_update(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(feature = "mac-app-store")]
+    {
+        let _ = app;
+        return Err("Cette version se met à jour via le Mac App Store.".to_string());
+    }
+
+    #[cfg(not(feature = "mac-app-store"))]
+    {
     let client = reqwest::Client::builder()
         .user_agent("LuniiSync/2.0")
         .timeout(std::time::Duration::from_secs(120))
@@ -509,6 +564,7 @@ async fn download_and_install_update(app: tauri::AppHandle) -> Result<(), String
     // 6. Quitter l'app courante
     app.exit(0);
     Ok(())
+    }
 }
 
 // ── Entrée principale ─────────────────────────────────────────────────────────
@@ -516,7 +572,6 @@ async fn download_and_install_update(app: tauri::AppHandle) -> Result<(), String
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             probe_lunii_device,
             get_device_info,
@@ -531,9 +586,9 @@ fn main() {
             reorder_story_in_pack_index,
             get_app_settings,
             save_device_name,
-            purge_legacy_device_entries,
             save_last_folder,
             get_cover_base64,
+            get_distribution_channel,
             eject_device,
             start_sync,
             check_for_update,

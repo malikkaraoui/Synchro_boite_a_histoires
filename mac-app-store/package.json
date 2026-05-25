@@ -1,13 +1,15 @@
 {
   "name": "luniisync",
-  "version": "2.1.12",
+  "version": "2.1.11",
   "description": "LuniiSync V2 — Transfert audio vers Lunii",
   "scripts": {
     "dev":            "tauri dev",
     "build":          "tauri build",
+    "build:mac-app-store": "tauri build --bundles app --target universal-apple-darwin --config src-tauri/tauri.appstore.conf.json",
     "tauri":          "tauri",
     "check:python":   "python3 -m py_compile lunii-bridge.py lunii-app.py lunii-push.py",
     "check:rust":     "cd src-tauri && cargo check",
+    "check:rust:mac-app-store": "cd src-tauri && cargo check --features mac-app-store",
     "test:rust":      "cd src-tauri && cargo test",
     "verify":         "npm run check:python && npm run check:rust"
   },

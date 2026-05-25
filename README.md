@@ -4,8 +4,8 @@
   <p><strong>Transférez vos histoires audio sur  "Ma Fabrique à Histoires" — facilement, sans abonnement.</strong></p>
   <p><em>La conteuse mobile pour vos histoires et podcasts préférés... et bien plus !</em></p>
   <p>
-    <img src="https://img.shields.io/badge/version-2.1.11-00b49e?style=flat-square"/>
-    <img src="https://img.shields.io/badge/plateforme-macOS-lightgrey?style=flat-square&logo=apple"/>
+    <img src="https://img.shields.io/badge/version-2.1.12-00b49e?style=flat-square"/>
+    <img src="https://img.shields.io/badge/plateforme-macOS%20%7C%20Windows-lightgrey?style=flat-square&logo=apple"/>
     <img src="https://img.shields.io/badge/Tauri-2.0-blue?style=flat-square"/>
     <img src="https://img.shields.io/badge/Rust-%23000000?style=flat-square&logo=rust"/>
     <img src="https://img.shields.io/badge/Python-3.10+-yellow?style=flat-square&logo=python"/>
@@ -33,6 +33,7 @@ L'application génère automatiquement un story-pack compatible Lunii à partir 
 - **Informations firmware** (HW version, FW major.minor.subminor)
 - **Noms lisibles** pour les histoires importées (depuis sidecar `.lunii-studio.json`)
 - **Journal de synchronisation** intégré avec animation de progression en temps réel
+- **Réparation d'index** — bouton dédié pour reconstruire le fichier d'index Lunii (`.pi`) en cas de corruption
 
 ## Stack technique
 
@@ -59,6 +60,37 @@ pip3 install PySide6 psutil py7zr xxtea pycryptodome
 1. Téléchargez `LuniiSync.app` depuis la [dernière release](https://github.com/malikkaraoui/Lunii_Synchro/releases/latest)
 2. Copiez-la dans `/Applications` ou sur votre bureau
 3. Lancez — les dépendances Python sont téléchargées automatiquement au premier transfert
+
+## Distribution macOS
+
+Le build macOS direct-download utilise maintenant une **signature ad-hoc par défaut**.
+
+Ça sert à éviter le faux message macOS **« app endommagée »** sur les builds Apple Silicon téléchargés depuis un navigateur.
+
+Important :
+
+- la signature ad-hoc suffit pour les tests et les diffusions limitées
+- pour une vraie distribution publique, il faut une signature **Developer ID Application** et une **notarization Apple**
+- sans notarization, macOS peut encore demander une validation manuelle dans **Réglages > Confidentialité et sécurité**
+
+Voir `MACOS_RELEASE.md` pour le pipeline conseillé.
+
+Exemples utiles :
+
+- build Apple Silicon : `./build-macos.sh`
+- build Intel depuis un Mac Apple Silicon : `MACOS_TARGET=x86_64-apple-darwin ./build-macos.sh`
+
+## Distribution Windows
+
+L'installateur Windows (`.exe` NSIS) est généré automatiquement via **GitHub Actions** à chaque nouvelle release.
+
+Il n'est pas nécessaire d'avoir un Mac pour produire le build Windows — le workflow `.github/workflows/windows-release.yml` s'en charge sur `windows-latest`.
+
+Pour déclencher manuellement un build Windows sur un tag existant :
+
+```
+Actions → Build Windows release → Run workflow → saisir le tag (ex: v2.1.12)
+```
 
 ## Utilisation
 

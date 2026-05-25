@@ -8,31 +8,28 @@
 
 ## État court
 
-- **Projet** : LuniiHACK (repo legacy/orchestration) + lunii-studio (repo actif, sibling `../lunii-studio`)
-- **Phase** : Transitionnelle — LuniiSync stable & vendu ; SFX système scoped, phase C (intégration) à démarrer
-- **Stack** : Python 3.12 + PySide6 (desktop GUI) ; FastAPI + SQLAlchemy + React/Vite (studio, sibling repo) ; FFmpeg + xxtea + pycryptodome (audio/device) ; bun (orchestration) ; pytest (307 tests CI)
-- **Objectif courant** : Stabiliser `../lunii-studio` sur quatre fronts : pipeline SFX MVP, contrat audio pédagogique (titre énoncé + pauses respectées) validé en run réel, séparation UX claire entre `/studio`, `/histoires` et `/bibliothèque`, et curation manuelle de la bibliothèque de bruitages via l'UI
-- **Dernière validation** : l'onglet `Bruitages` de `../lunii-studio` affiche maintenant une vraie piste audio visuelle par bruitage avec lecture locale intégrée + poignées de trim directement sur la waveform (sans dépendre du player global pour les SFX) ; `bun run typecheck` OK
-- **Prochaine action utile** : tester sur un lot réel 20–50 sons, ajuster au besoin la précision ergonomique des poignées, puis envisager une waveform repliable multi-cartes ou un mode plein écran pour curation massive
+- Projet : **LuniiSync** (repo : `malikkaraoui/Lunii_Synchro`)
+- Phase : **Production — maintenance active** (dernière release : v2.1.12 le 2026-05-22)
+- Stack : **Tauri 2.0 (Rust) + Vanilla JS/HTML/CSS + Python sidecar (lunii-bridge.py)**
+- Objectif courant : améliorer la fiabilité et l'UX du transfert audio vers la Lunii
+- Prochaine action utile : implémenter l'affichage des pochettes d'histoires (TODO.md)
 
 ## À lire en priorité
 
-- `CHANTIER_BRUITAGES_AUTOMATIQUES_2026-05-20.md` — spec SFX MVP (531 lignes, architecturalement complet)
-- `vault/40-roadmap.md` — phases livré/en cours/planifié
-- `AUDIT_STRATEGIQUE_LUNII_STUDIO_2026-05-17.md` — positionnement produit et décisions marché
+- .claude/CLAUDE.md §0 — contexte session courant
+- vault/40-roadmap.md — prochaines phases
+- TODO.md — fonctionnalités planifiées
 
 ## Décisions actives
 
-- LuniiHACK = repo d'orchestration/legacy ; développement actif dans `../lunii-studio`
-- LuniiSync (9,99€) : produit stable, ne pas casser les paths de build
-- SFX MVP : histoires uniquement (pas leçons/podcasts), 100 sons max, backend valide les cues
-- Architecture cloud : Hybride préféré pour MVP (LLM cloud, audio local, desktop-first)
-- Pas de réécriture Go/Rust : Python/FastAPI + Tauri suffisant pour la phase actuelle
+- Architecture hybride Rust+Python maintenue (Rust pour la détection/inventaire, Python pour la crypto Lunii)
+- Identification device par `serial-*` (plus stable que UUID FAT32)
+- Signature macOS ad-hoc (`-`) par défaut pour les builds directs
+- Distribution via GitHub Releases avec updater intégré
 
 ## Risques / angles morts
 
-- Migration physique code LuniiHACK → LaForge_a_histoires/ différée (casse potentielle builds)
-- Qualité bibliothèque SFX locale : userpack actuel rejeté (mauvaise qualité) ; Kenney/Freesound CC0 non encore curé
-- LLM sound_cues : `anchor_segment_id` peut être invalidé par reformulation LLM (risque de désynchronisation)
-- Détection device : variabilité mount point selon OS (macOS/Linux/Windows)
-- Décision cloud non finalisée : Full Cloud vs Hybrid bloque l'architecture réseau
+- Dépendance `Lunii.QT` (bibliothèque tierce) — si l'API Lunii change, le pack generator est cassé
+- Builds Windows non testés en production (workflow GitHub ajouté en v2.1.11 mais non validé)
+- Signature macOS ad-hoc : Apple peut encore bloquer sur certaines configurations
+- Dépendances Python téléchargées au premier transfert depuis Internet (point de fragilité)

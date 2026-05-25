@@ -3,10 +3,14 @@ const { invoke } = window.__TAURI__.core;
 const { open }   = window.__TAURI__.dialog;
 const { listen } = window.__TAURI__.event;
 
-const APP_VERSION = "2.1.12";
+const APP_VERSION = "2.1.11";
+const APP_STORE_IMPORT_MESSAGE = "Import audio temporairement indisponible dans cette variante Mac App Store.";
 // URL de vérification des mises à jour (GitHub releases API)
 
 // ── État ──────────────────────────────────────────────────────────────────────
+let distributionChannel = "direct";
+let distributionChannelPromise = null;
+let importAudioSupported = true;
 let deviceMount   = null;
 let deviceId      = null;
 let appSettings   = { devices: {}, lastAudioFolder: null, theme: "auto" };
@@ -41,6 +45,7 @@ const $folderList      = document.getElementById("folder-list");
 const $folderEmpty     = document.getElementById("folder-empty");
 const $folderHeader    = document.getElementById("folder-list-header");
 const $folderCount     = document.getElementById("folder-file-count");
+const $syncAvailabilityNote = document.getElementById("sync-availability-note");
 const $addAllBtn       = document.getElementById("add-all-btn");
 const $removeAllBtn    = document.getElementById("remove-all-btn");
 const $syncStatusBar   = document.getElementById("sync-status-bar");
@@ -71,6 +76,39 @@ function initial(name) {
   return (name || "?")[0].toUpperCase();
 }
 
+function isMacAppStoreChannel() {
+  return distributionChannel === "mac-app-store";
+}
+
+function applyDistributionChannelUi(channel = distributionChannel) {
+  const isAppStore = channel === "mac-app-store";
+  importAudioSupported = !isAppStore;
+  $syncAvailabilityNote?.classList.toggle("hidden", !isAppStore);
+  $pickBtn.disabled = isAppStore;
+  $pickBtn.title = isAppStore ? APP_STORE_IMPORT_MESSAGE : "Parcourir…";
+
+  if (isAppStore && pendingIds.size > 0) {
+    pendingIds.clear();
+    if (audioFiles.length > 0) renderFolderList();
+  }
+
+  updateSyncButton();
+}
+
+async function ensureDistributionChannel() {
+  if (!distributionChannelPromise) {
+    distributionChannelPromise = invoke("get_distribution_channel")
+      .then((channel) => {
+        distributionChannel = channel || "direct";
+        applyDistributionChannelUi(distributionChannel);
+        return distributionChannel;
+      })
+      .catch(() => distributionChannel);
+  }
+
+  return distributionChannelPromise;
+}
+
 // ── Splash screen ─────────────────────────────────────────────────────────────
 async function runSplash() {
   const $splash   = document.getElementById("splash");
@@ -90,27 +128,35 @@ async function runSplash() {
     $bar.style.width = pct + "%";
   }, 120);
 
-  try {
-    const latest = await invoke("check_for_update");
-    if (latest && latest !== APP_VERSION) {
-      $label.textContent = `Nouvelle version disponible : v${latest} — cliquez pour installer`;
-      $label.style.color = "#f0a32a";
-      $label.style.cursor = "pointer";
-      $label.onclick = () => {
-        $label.textContent = "Téléchargement en cours…";
-        $label.style.cursor = "default";
-        $label.onclick = null;
-        invoke("download_and_install_update").catch(e => {
-          $label.textContent = `Erreur : ${e}`;
-          $label.style.color = "#e55";
-        });
-      };
-    } else {
-      $label.textContent = "Application à jour ✓";
-      $label.style.color = "#00957f";
+  const channel = await ensureDistributionChannel();
+
+  if (channel === "mac-app-store") {
+    $label.textContent = "Mises à jour via le Mac App Store";
+    $label.style.color = "#00957f";
+  } else {
+
+    try {
+      const latest = await invoke("check_for_update");
+      if (latest && latest !== APP_VERSION) {
+        $label.textContent = `Nouvelle version disponible : v${latest} — cliquez pour installer`;
+        $label.style.color = "#f0a32a";
+        $label.style.cursor = "pointer";
+        $label.onclick = () => {
+          $label.textContent = "Téléchargement en cours…";
+          $label.style.cursor = "default";
+          $label.onclick = null;
+          invoke("download_and_install_update").catch(e => {
+            $label.textContent = `Erreur : ${e}`;
+            $label.style.color = "#e55";
+          });
+        };
+      } else {
+        $label.textContent = "Application à jour ✓";
+        $label.style.color = "#00957f";
+      }
+    } catch {
+      $label.textContent = "Pas de connexion — vérification ignorée";
     }
-  } catch {
-    $label.textContent = "Pas de connexion — vérification ignorée";
   }
 
   clearInterval(tick);
@@ -210,7 +256,15 @@ $checkUpdateBtn.addEventListener("click", async () => {
   $updateResult.className = "update-result";
   $updateResult.textContent = "Vérification…";
   $updateResult.classList.remove("hidden");
+
   try {
+    const channel = await ensureDistributionChannel();
+    if (channel === "mac-app-store") {
+      $updateResult.classList.add("update-ok");
+      $updateResult.textContent = "Cette version se met à jour via le Mac App Store";
+      return;
+    }
+
     const latest = await invoke("check_for_update");
     if (latest && latest !== APP_VERSION) {
       $updateResult.classList.add("update-new");
@@ -269,7 +323,6 @@ function renderSettingsDevices() {
 async function deleteDevice(id) {
   delete appSettings.devices[id];
   await invoke("save_device_name", { deviceId: id, name: "" }).catch(() => {});
-  appSettings = await invoke("get_app_settings").catch(() => appSettings);
   renderSettingsDevices();
   if (deviceId === id) renderDeviceName(null);
 }
@@ -324,12 +377,12 @@ async function pollDevice() {
                 !id.startsWith("serial-") && info && info.name
               );
               if (oldEntry) {
-                appSettings.devices[deviceId] = { name: oldEntry[1].name };
+                appSettings.devices[deviceId] = { name: oldEntry[1].name, lastFolder: oldEntry[1].lastFolder || "" };
                 await invoke("save_device_name", { deviceId, name: oldEntry[1].name });
               }
             }
-            await invoke("purge_legacy_device_entries");
-            appSettings = await invoke("get_app_settings");
+            for (const id of oldUUIDs) delete appSettings.devices[id];
+            await invoke("save_last_folder", { deviceId, folder: appSettings.devices[deviceId]?.lastFolder || "" });
           }
         }
         renderDeviceName(deviceId);
@@ -736,6 +789,11 @@ async function loadFolder(folderPath) {
 }
 
 $pickBtn.addEventListener("click", async () => {
+  if (!importAudioSupported) {
+    showToast(APP_STORE_IMPORT_MESSAGE, "warn", 5000);
+    return;
+  }
+
   const selected = await open({ directory: true, multiple: false });
   if (!selected) return;
   await invoke("save_last_folder", { folder: selected });
@@ -768,7 +826,8 @@ function renderFolderList() {
   $folderEmpty.classList.add("hidden");
   $folderHeader.style.display = "";
   $folderCount.textContent = `${audioFiles.length} fichier${audioFiles.length !== 1 ? "s" : ""}`;
-  $addAllBtn.classList.remove("hidden");
+  if (importAudioSupported) $addAllBtn.classList.remove("hidden");
+  else $addAllBtn.classList.add("hidden");
 
   const frag = document.createDocumentFragment();
   frag.appendChild($folderEmpty);
@@ -815,7 +874,12 @@ function renderFolderList() {
     const addBtn = document.createElement("button");
     addBtn.className = "btn-add" + (isQueued ? " added" : "");
     if (!isQueued) addBtn.textContent = "+";
-    addBtn.title = isQueued ? "Déjà dans la file" : "Ajouter à la synchronisation";
+    addBtn.title = !importAudioSupported
+      ? APP_STORE_IMPORT_MESSAGE
+      : isQueued
+        ? "Déjà dans la file"
+        : "Ajouter à la synchronisation";
+    addBtn.disabled = !importAudioSupported;
     addBtn.addEventListener("click", () => togglePending(af.storyId, row, av, addBtn));
     right.appendChild(addBtn);
 
@@ -827,6 +891,11 @@ function renderFolderList() {
 }
 
 function togglePending(storyId, row, av, btn) {
+  if (!importAudioSupported) {
+    showToast(APP_STORE_IMPORT_MESSAGE, "warn", 5000);
+    return;
+  }
+
   if (pendingIds.has(storyId)) {
     pendingIds.delete(storyId);
     av.classList.remove("queued");
@@ -845,6 +914,11 @@ function togglePending(storyId, row, av, btn) {
 
 // ── Tout ajouter / Tout retirer ───────────────────────────────────────────────
 $addAllBtn.addEventListener("click", () => {
+  if (!importAudioSupported) {
+    showToast(APP_STORE_IMPORT_MESSAGE, "warn", 5000);
+    return;
+  }
+
   for (const af of audioFiles) pendingIds.add(af.storyId);
   renderFolderList();
   updateSyncButton();
@@ -878,6 +952,8 @@ $syncBtn.addEventListener("click", startSync);
 
 // ── Helpers sync status ───────────────────────────────────────────────────────
 let _syncTotal = 0;
+let doneDeleted = 0;
+let doneErrors = 0;
 
 function showSyncStatus(text, current = 0, total = 0) {
   _syncTotal = total;
@@ -920,6 +996,15 @@ async function startSync() {
   const selectedFiles = selectedAudio.map(a => a.path);
   const totalFiles = selectedFiles.length;
 
+  if (isMacAppStoreChannel() && selectedFiles.length > 0) {
+    pendingIds.clear();
+    renderFolderList();
+    updateSyncButton();
+    log("warn", APP_STORE_IMPORT_MESSAGE);
+    showToast(APP_STORE_IMPORT_MESSAGE, "warn", 5000);
+    return;
+  }
+
   const toDelete = [...pendingDeletes];
 
   syncing = true;
@@ -934,7 +1019,6 @@ async function startSync() {
 
   // Suppressions d'abord
   let deleted = 0;
-  let doneDeleted = 0;
   for (const uuid of toDelete) {
     try {
       await invoke("remove_orphan_story", { mount: deviceMount, shortUuid: uuid });
@@ -952,7 +1036,7 @@ async function startSync() {
     catch { log("info", payload); }
   });
 
-  let doneAdded = deleted, doneErrors = 0;
+  doneErrors = 0;
   try {
     if (selectedFiles.length > 0) {
       showSyncStatus("Transfert en cours…", 0, totalFiles);
@@ -1090,11 +1174,15 @@ $repairBtn.addEventListener("click", async () => {
   if (!deviceMount || syncing) return;
   $repairBtn.disabled = true;
   $repairBtn.title = "Réparation en cours…";
-  log("ok", "Réparation de l'index en cours…");
+  log("ok", isMacAppStoreChannel()
+    ? "Réparation native de l'index en cours…"
+    : "Réparation de l'index en cours…");
   $logDrawer.classList.remove("hidden");
   try {
     await invoke("repair_pack_index", { deviceMount });
-    log("ok", "Index réparé — redémarre la Lunii pour voir les histoires.");
+    log("ok", isMacAppStoreChannel()
+      ? "Index réparé nativement — redémarre la Lunii pour voir les histoires."
+      : "Index réparé — redémarre la Lunii pour voir les histoires.");
   } catch (e) {
     log("err", `Réparation échouée : ${e}`);
   } finally {
@@ -1109,6 +1197,7 @@ $repairBtn.addEventListener("click", async () => {
   const splashPromise = runSplash();
 
   appSettings = await invoke("get_app_settings");
+  applyDistributionChannelUi(await ensureDistributionChannel());
 
   // Appliquer le thème sauvegardé
   const savedTheme = appSettings.theme || "auto";

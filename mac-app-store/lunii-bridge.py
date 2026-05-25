@@ -1,0 +1,448 @@
+#!/usr/bin/env python3
+"""
+lunii-bridge.py — V2 Python sidecar : génération de story packs + import Lunii.
+Appelé par Tauri/Rust : python3 lunii-bridge.py <audio_folder> <device_mount>
+Chaque ligne stdout est un objet JSON (type: "progress"|"error"|"done"|"stderr").
+"""
+
+import sys
+import os
+import json
+import subprocess
+import tempfile
+import shutil
+import hashlib
+import io
+import zipfile
+import urllib.request
+import platform
+from pathlib import Path
+from typing import Optional
+from datetime import datetime, timezone
+
+# ── Chemins ───────────────────────────────────────────────────────────────────
+SCRIPT_DIR   = Path(__file__).resolve().parent
+# Dépendances dans ~/.luniisync/ (répertoire utilisateur, toujours accessible en écriture)
+DEPS_DIR     = Path.home() / ".luniisync"
+DEPS_DIR.mkdir(exist_ok=True)
+LUNII_QT_DIR = DEPS_DIR / "Lunii.QT"
+SPG_BIN      = DEPS_DIR / "studio-pack-generator"
+SPG_VERSION  = "0.5.14"
+AUDIO_EXTS   = {".mp3", ".m4a", ".wav", ".ogg", ".flac"}
+
+
+# ── Émission JSON ─────────────────────────────────────────────────────────────
+def emit(msg_type: str, **kwargs) -> None:
+    print(json.dumps({"type": msg_type, **kwargs}), flush=True)
+
+
+# ── Bootstrap Lunii.QT ────────────────────────────────────────────────────────
+def _bootstrap_lunii_qt() -> None:
+    if LUNII_QT_DIR.is_dir():
+        return
+    emit("progress", step="setup", message="Clonage de Lunii.QT…")
+    subprocess.run(
+        ["git", "clone", "--quiet", "https://github.com/o-daneel/Lunii.QT.git", str(LUNII_QT_DIR)],
+        check=True,
+    )
+    emit("progress", step="setup", message="Lunii.QT cloné.")
+
+
+# ── Bootstrap SPG ─────────────────────────────────────────────────────────────
+def _bootstrap_spg() -> None:
+    if SPG_BIN.exists():
+        return
+
+    arch   = platform.machine().lower()
+    system = platform.system().lower()
+
+    if system == "darwin":
+        tag = "aarch64-apple" if arch == "arm64" else "x86_64-apple"
+    elif system == "windows":
+        tag = "x86_64-windows"
+    else:
+        tag = "x86_64-linux"
+
+    zip_name = f"studio-pack-generator-{SPG_VERSION}-{tag}.zip"
+    bin_name = f"studio-pack-generator-{tag}"
+    url = (
+        f"https://github.com/jersou/studio-pack-generator/releases/"
+        f"download/v{SPG_VERSION}/{zip_name}"
+    )
+
+    emit("progress", step="setup", message=f"Téléchargement studio-pack-generator {SPG_VERSION}…")
+    with urllib.request.urlopen(url) as resp:  # noqa: S310 — URL vérifiée ci-dessus
+        data = resp.read()
+
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        z.extract(bin_name, DEPS_DIR)
+
+    src = DEPS_DIR / bin_name
+    src.rename(SPG_BIN)
+    SPG_BIN.chmod(0o755)
+    emit("progress", step="setup", message="studio-pack-generator prêt.")
+
+
+# ── Patch lecture directe ─────────────────────────────────────────────────────
+def _patch_direct_play(zip_path: Path) -> None:
+    """Réécrit story.json pour que l'audio démarre directement à la sélection."""
+    try:
+        with zipfile.ZipFile(zip_path) as z:
+            story_json = json.loads(z.read("story.json"))
+            files = {name: z.read(name) for name in z.namelist()}
+
+        nodes = story_json.get("stageNodes", [])
+        square_one = next((n for n in nodes if n.get("squareOne")), None)
+        podcast_node = next((n for n in nodes if not n.get("squareOne")), None)
+
+        if not square_one or not podcast_node:
+            return
+
+        square_one["audio"] = podcast_node.get("audio", "")
+        square_one["controlSettings"] = {
+            "autoplay": False,
+            "home": True,
+            "ok": False,
+            "pause": True,
+            "wheel": False,
+        }
+        square_one["okTransition"] = None
+        square_one["homeTransition"] = None
+
+        story_json["stageNodes"] = [square_one]
+        story_json["actionNodes"] = []
+        story_json["listNodes"] = []
+
+        files["story.json"] = json.dumps(story_json).encode()
+
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+            for name, data in files.items():
+                z.writestr(name, data)
+    except Exception:
+        pass  # Non bloquant
+
+
+# ── Couverture PNG ────────────────────────────────────────────────────────────
+def _inject_cover_image(zip_path: Path, title: str) -> None:
+    """Ajoute une couverture directement dans le ZIP si aucune image n'est référencée."""
+    try:
+        from PIL import Image, ImageDraw  # type: ignore
+    except Exception:
+        return
+
+    try:
+        with zipfile.ZipFile(zip_path) as z:
+            names = z.namelist()
+            story_json = json.loads(z.read("story.json"))
+            has_images = any(snode.get("image") for snode in story_json.get("stageNodes", []))
+            if has_images:
+                return
+            files = {name: z.read(name) for name in names}
+
+        img = Image.new("RGB", (320, 240), color=(20, 50, 120))
+        draw = ImageDraw.Draw(img)
+        draw.text((160, 120), title[:28], fill=(255, 255, 255), anchor="mm")
+
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        cover_bytes = buf.getvalue()
+        cover_name = hashlib.sha1(cover_bytes).hexdigest() + ".png"
+
+        for snode in story_json.get("stageNodes", []):
+            snode["image"] = cover_name
+
+        files["story.json"] = json.dumps(story_json).encode()
+        files[f"assets/{cover_name}"] = cover_bytes
+
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+            for name, data in files.items():
+                z.writestr(name, data)
+    except Exception:
+        pass  # Non bloquant
+
+
+# ── Génération ZIP via SPG ────────────────────────────────────────────────────
+def _generate_zip(audio_path: Path, work_dir: Path) -> Optional[Path]:
+    story_dir = work_dir / audio_path.stem
+    story_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copier fichier audio
+    shutil.copy2(audio_path, story_dir / audio_path.name)
+
+    # Appel SPG
+    env = os.environ.copy()
+    if sys.platform == "darwin":
+        # Homebrew ARM/Intel — résoudre ffmpeg
+        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + env.get("PATH", "")
+
+    out_dir = work_dir / "out"
+    out_dir.mkdir(exist_ok=True)
+
+    try:
+        result = subprocess.run(
+            [
+                str(SPG_BIN),
+                "--skip-extract-image-from-mp-3",
+                "--output-folder", str(out_dir),
+                str(story_dir),
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=180,
+        )
+    except subprocess.TimeoutExpired:
+        emit("error", file=audio_path.name, message="Timeout studio-pack-generator (>180s)")
+        return None
+    except Exception as exc:
+        emit("error", file=audio_path.name, message=str(exc))
+        return None
+
+    if result.returncode != 0:
+        msg = result.stderr.strip() or result.stdout.strip() or "SPG a échoué"
+        emit("error", file=audio_path.name, message=msg)
+        return None
+
+    # Trouver le ZIP généré
+    zips = sorted(out_dir.glob("*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not zips:
+        emit("error", file=audio_path.name, message="Aucun ZIP généré par SPG")
+        return None
+
+    zip_path = zips[0]
+    _inject_cover_image(zip_path, audio_path.stem)
+    _patch_direct_play(zip_path)
+    return zip_path
+
+
+# ── Sidecar LuniiSync ─────────────────────────────────────────────────────────
+def _write_sidecar(device, story_id: str, before_uuids: set) -> None:
+    """Écrit .lunii-studio.json pour l'histoire nouvellement importée."""
+    mount = Path(device.mount_point)
+    content_dir = mount / ".content"
+    if not content_dir.is_dir():
+        return
+    current_uuids = {d.name for d in content_dir.iterdir() if d.is_dir()}
+    new_uuids = current_uuids - before_uuids
+    if not new_uuids:
+        return
+    short_uuid = new_uuids.pop()
+    sidecar_path = content_dir / short_uuid / ".lunii-studio.json"
+    data = {
+        "storyId": story_id,
+        "hash": "",
+        "pushedAt": datetime.now(timezone.utc).isoformat(),
+        "source": "luniisync",
+    }
+    try:
+        with open(sidecar_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
+# ── Import vers device ────────────────────────────────────────────────────────
+def _import_one(device, audio_path: Path, work_dir: Path) -> bool:
+    zip_path = _generate_zip(audio_path, work_dir)
+    if zip_path is None:
+        return False
+
+    # Vérifier que le device est encore accessible avant d'appeler import_story
+    mount = Path(device.mount_point)
+    if not mount.is_dir():
+        emit("error", file=audio_path.name, message="Boîte déconnectée — rebranchez et relancez.")
+        return False
+
+    content_dir = mount / ".content"
+    before_uuids = {d.name for d in content_dir.iterdir() if d.is_dir()} if content_dir.is_dir() else set()
+
+    import concurrent.futures as _cf
+    import errno as _errno
+
+    def _do_import():
+        return device.import_story(str(zip_path))
+
+    try:
+        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(_do_import)
+            try:
+                ok = future.result(timeout=120)
+            except _cf.TimeoutError:
+                emit("error", file=audio_path.name, message="Timeout import (>120s) — boîte trop lente ou déconnectée.")
+                return False
+        if ok:
+            _write_sidecar(device, audio_path.stem, before_uuids)
+        return bool(ok)
+    except OSError as exc:
+        if exc.errno == _errno.EIO:
+            emit("error", file=audio_path.name, message="Boîte éjectée pendant le transfert — rebranchez et relancez.")
+        else:
+            emit("error", file=audio_path.name, message=str(exc))
+        return False
+    except Exception as exc:
+        emit("error", file=audio_path.name, message=str(exc))
+        return False
+
+
+# ── Réparation index ──────────────────────────────────────────────────────────
+def _repair_index(device_mount: Path) -> None:
+    """Recrée le fichier .pi à partir du contenu de .content/"""
+    if not device_mount.is_dir():
+        emit("error", message=f"Montage Lunii introuvable : {device_mount}")
+        sys.exit(1)
+
+    _bootstrap_lunii_qt()
+    sys.path.insert(0, str(LUNII_QT_DIR))
+    try:
+        try:
+            from PySide6.QtCore import QCoreApplication  # type: ignore
+        except ImportError:
+            from PyQt6.QtCore import QCoreApplication    # type: ignore
+        if QCoreApplication.instance() is None:
+            _q_app = QCoreApplication(sys.argv[:1])
+        from pkg.api.device_lunii import LuniiDevice  # type: ignore
+    except ImportError as exc:
+        emit("error", message=f"Import Lunii.QT échoué : {exc}")
+        sys.exit(1)
+
+    try:
+        device = LuniiDevice(str(device_mount))
+        device.update_pack_index()
+        emit("done", added=0, errors=0, message="Index réparé — redémarre la Lunii.")
+    except Exception as exc:
+        emit("error", message=f"Réparation échouée : {exc}")
+        sys.exit(1)
+
+
+# ── Point d'entrée ────────────────────────────────────────────────────────────
+def main() -> None:
+    # Mode réparation d'index
+    if len(sys.argv) >= 3 and sys.argv[1] == "--repair-index":
+        _repair_index(Path(sys.argv[2]))
+        return
+
+    if len(sys.argv) < 3:
+        emit("error", message=f"Usage: {sys.argv[0]} <audio_folder> <device_mount>")
+        sys.exit(1)
+
+    audio_folder  = Path(sys.argv[1])
+    device_mount  = Path(sys.argv[2])
+
+    if not audio_folder.is_dir():
+        emit("error", message=f"Dossier audio introuvable : {audio_folder}")
+        sys.exit(1)
+    if not device_mount.is_dir():
+        emit("error", message=f"Montage Lunii introuvable : {device_mount}")
+        sys.exit(1)
+
+    # ── Setup ─────────────────────────────────────────────────────────────────
+    try:
+        _bootstrap_lunii_qt()
+        _bootstrap_spg()
+    except Exception as exc:
+        emit("error", message=f"Setup échoué : {exc}")
+        sys.exit(1)
+
+    # ── Charger Lunii.QT ──────────────────────────────────────────────────────
+    sys.path.insert(0, str(LUNII_QT_DIR))
+    try:
+        # QCoreApplication est requis par Lunii.QT avant tout import de pkg.*
+        try:
+            from PySide6.QtCore import QCoreApplication  # type: ignore
+        except ImportError:
+            from PyQt6.QtCore import QCoreApplication    # type: ignore
+        if QCoreApplication.instance() is None:
+            _q_app = QCoreApplication(sys.argv[:1])
+
+        from pkg.api.device_lunii import LuniiDevice  # type: ignore  # noqa: E402
+    except ImportError as exc:
+        emit("error", message=f"Import Lunii.QT échoué : {exc}")
+        sys.exit(1)
+
+    # ── Charger device ────────────────────────────────────────────────────────
+    try:
+        device = LuniiDevice(str(device_mount))
+    except Exception as exc:
+        emit("error", message=f"Chargement device échoué : {exc}")
+        sys.exit(1)
+
+    # ── Scanner dossier audio ─────────────────────────────────────────────────
+    if len(sys.argv) > 3:
+        # Fichiers spécifiques passés en arguments (sélection utilisateur)
+        audio_files = sorted(
+            Path(p) for p in sys.argv[3:]
+            if Path(p).is_file() and Path(p).suffix.lower() in AUDIO_EXTS
+        )
+    else:
+        # Fallback : scanner tout le dossier
+        audio_files = sorted(
+            p for p in audio_folder.iterdir()
+            if p.is_file() and p.suffix.lower() in AUDIO_EXTS
+        )
+
+    if not audio_files:
+        emit("done", added=0, errors=0, message="Aucun fichier audio trouvé.")
+        return
+
+    emit("progress", step="scan",
+         message=f"{len(audio_files)} fichier(s) audio trouvé(s).")
+
+    # ── Import ────────────────────────────────────────────────────────────────
+    added  = 0
+    errors = 0
+
+    with tempfile.TemporaryDirectory(prefix="luniisync-") as tmp:
+        for i, audio_path in enumerate(audio_files, 1):
+            work_dir = Path(tmp) / audio_path.stem
+            work_dir.mkdir(exist_ok=True)
+
+            emit("progress", step="import",
+                 file=audio_path.name,
+                 current=i, total=len(audio_files),
+                 message=f"[{i}/{len(audio_files)}] {audio_path.name}…")
+
+            ok = _import_one(device, audio_path, work_dir)
+            if ok:
+                added += 1
+                emit("progress", step="import",
+                     file=audio_path.name, current=i, total=len(audio_files),
+                     message=f"✓ {audio_path.name}")
+            else:
+                errors += 1
+
+    # ── Mise à jour index (3 tentatives) ─────────────────────────────────────
+    import time as _time
+    import errno as _errno
+
+    index_ok = False
+    for attempt in range(3):
+        try:
+            device.update_pack_index()
+            index_ok = True
+            emit("progress", step="index",
+                 message=f"✓ Index boîte mis à jour ({added} histoire(s) enregistrée(s)).")
+            break
+        except OSError as exc:
+            if exc.errno == _errno.EIO:
+                if attempt < 2:
+                    emit("progress", step="index",
+                         message=f"⚠ Tentative {attempt + 2}/3 mise à jour index…")
+                    _time.sleep(1.5)
+                    continue
+                emit("error", message="⚠ Index non mis à jour (boîte trop lente) — appuyez sur 🔧 dans l'app.")
+            else:
+                emit("error", message=f"⚠ Index échoué : {exc} — appuyez sur 🔧 dans l'app.")
+            break
+        except Exception as exc:
+            emit("error", message=f"⚠ Index non mis à jour : {exc} — appuyez sur 🔧 dans l'app.")
+            break
+
+    if not index_ok:
+        errors += 1
+
+    emit("done", added=added, errors=errors,
+         message=f"Terminé : {added} ajouté(s), {errors} erreur(s).")
+
+
+if __name__ == "__main__":
+    main()

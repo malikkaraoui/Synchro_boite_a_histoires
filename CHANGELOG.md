@@ -4,6 +4,14 @@ Toutes les évolutions notables du projet, dans l'ordre antéchronologique.
 
 ---
 
+## [2.1.12] — 2026-05-22
+
+### Corrigé
+
+- purge persistante des anciennes boîtes mémorisées par UUID dès qu’une Lunii est reconnue via `serial-*`
+- suppression réelle des boîtes enregistrées vides dans les réglages
+- build macOS Apple Silicon régénéré avec le correctif du doublon de boîtes dans les réglages
+
 ## [2.1.11] — 2026-05-22
 
 ### Ajouté
@@ -15,6 +23,9 @@ Toutes les évolutions notables du projet, dans l'ordre antéchronologique.
 
 - L’updater macOS sélectionne maintenant l’archive `.tar.gz` correspondant à l’architecture de la machine
 - Préparation de l’exécution Python rendue plus robuste hors macOS
+- Build macOS direct-download signé en ad-hoc par défaut pour éviter le faux message « app endommagée » sur Apple Silicon téléchargé
+- Vérification de signature bundle ajoutée au script `build-macos.sh`, avec mode Developer ID / notarization documenté
+- Les réglages n’empilent plus les anciennes boîtes mémorisées par UUID quand une Lunii est désormais reconnue via `serial-*` ; les anciennes entrées sont maintenant purgées de façon persistante
 
 ---
 

@@ -1,0 +1,16 @@
+{
+  "identifier": "com.malikkaraoui.luniisync",
+  "bundle": {
+    "targets": ["app"],
+    "category": "Utility",
+    "createUpdaterArtifacts": false,
+    "resources": [],
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "entitlements": "../lunii-app-store.entitlements"
+    }
+  },
+  "build": {
+    "features": ["mac-app-store"]
+  }
+}
