@@ -4,6 +4,13 @@
 
 ## Courrier entrant
 
+### 2026-05-25 — Session Mac App Store [auto]
+
+- Source : Claude (claude-sonnet-4-6)
+- Statut : archivé
+- Résumé : Session complète de préparation Mac App Store. Pipeline import natif Rust implémenté (storybox_crypto.rs + storybox_import.rs + start_sync_native). 7 bloqueurs App Store corrigés : gate des 3 spawns process interdits (diskutil info, df -k, diskutil eject), création PrivacyInfo.xcprivacy, correction versions, retrait network.client entitlement, bouton "Sélectionner la Lunii" + import audio débloqué dans le frontend. Renommage complet lunii_ vers storybox_ et lunii-*.py vers boite-*.py. 45/45 tests passent. Commits : 7f2f797, 0b50a0c, 8f9c642, 7b5c53d.
+- Prochaine action : reprendre jeudi avec device physique V2 pour valider le crypto XXTEA. Textes App Store et visuels préparés pour soumission.
+
 ### 2026-05-22 — Session initialisation vault [auto]
 
 - Source : Claude (claude-sonnet-4-6) — lecture complète des fichiers projet
