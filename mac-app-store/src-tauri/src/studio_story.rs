@@ -196,7 +196,7 @@ impl StudioStory {
         ni_buffer.extend_from_slice(&(self.stage_nodes.len() as u32).to_le_bytes());
         ni_buffer.extend_from_slice(&(self.ri.len() as u32).to_le_bytes());
         ni_buffer.extend_from_slice(&(self.si.len() as u32).to_le_bytes());
-        ni_buffer.push(1);
+        ni_buffer.push(self.night_mode_available as u8);
         ni_buffer.resize(NI_HEADER_SIZE, 0);
 
         for stage_node in &self.stage_nodes {
@@ -416,6 +416,19 @@ mod tests {
         assert_eq!(story.si[0].normalized_name, "INTRO");
         assert_eq!(story.si[1].normalized_name, "MAIN");
         assert_eq!(story.li, vec![1]);
+    }
+
+    #[test]
+    fn ni_night_mode_byte_reflects_json_field() {
+        let mut story_json = sample_story_json();
+        story_json["nightModeAvailable"] = serde_json::json!(false);
+        let story = StudioStory::from_json(&story_json).unwrap();
+        let ni = story.ni_data().unwrap();
+        assert_eq!(ni[24], 0, "nightMode=false → octet 24 doit être 0");
+
+        let story_nm = StudioStory::from_json(&sample_story_json()).unwrap();
+        let ni_nm = story_nm.ni_data().unwrap();
+        assert_eq!(ni_nm[24], 1, "nightMode=true → octet 24 doit être 1");
     }
 
     #[test]

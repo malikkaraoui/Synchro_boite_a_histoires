@@ -55,6 +55,7 @@ const $syncStatusCount = document.getElementById("sync-status-count");
 const $syncToast       = document.getElementById("sync-toast");
 const $ejectBtn        = document.getElementById("eject-btn");
 const $repairBtn       = document.getElementById("repair-btn");
+const $refreshBtn      = document.getElementById("refresh-btn");
 const $deviceFwLabel   = document.getElementById("device-fw-label");
 const $namingModal     = document.getElementById("naming-modal");
 const $namingInput     = document.getElementById("naming-input");
@@ -357,12 +358,12 @@ async function pollDevice() {
     let probe;
     if (isMacAppStoreChannel() && deviceMount) {
       const valid = await invoke("validate_storybox_mount", { path: deviceMount });
-      if (!valid) deviceMount = null;
-      probe = valid
-        ? { connected: true, mount: deviceMount, deviceId: null, markerFound: true, contentDirPresent: true, storyDirCount: 0 }
-        : { connected: false };
-    } else if (isMacAppStoreChannel()) {
-      probe = { connected: false };
+      if (valid) {
+        probe = { connected: true, mount: deviceMount, deviceId: null, markerFound: true, contentDirPresent: true, storyDirCount: 0 };
+      } else {
+        deviceMount = null;
+        probe = await invoke("probe_storybox_device");
+      }
     } else {
       probe = await invoke("probe_storybox_device");
     }
@@ -1179,9 +1180,35 @@ $ejectBtn.addEventListener("click", async () => {
   }
 });
 
+// ── Réactualiser la détection ─────────────────────────────────────────────────
+$refreshBtn.addEventListener("click", async () => {
+  if (syncing || reordering || draggingStory) return;
+  $refreshBtn.disabled = true;
+  $refreshBtn.classList.add("spinning");
+  try {
+    await pollDevice();
+  } finally {
+    $refreshBtn.disabled = false;
+    $refreshBtn.classList.remove("spinning");
+  }
+});
+
 // ── Réparation index ──────────────────────────────────────────────────────────
 $repairBtn.addEventListener("click", async () => {
   if (!deviceMount || syncing) return;
+
+  const confirmed = window.confirm(
+    "🔧 Réparer l'index de la boîte\n\n" +
+    "À utiliser uniquement si :\n" +
+    "  • Un import s'est interrompu (crash, déconnexion)\n" +
+    "  • Des fichiers ont été copiés manuellement via le Finder\n" +
+    "  • L'index semble corrompu ou incomplet\n\n" +
+    "⚠️ Cette action NE change PAS l'ordre des histoires.\n" +
+    "Pour réordonner, utilisez le glisser-déposer dans la liste.\n\n" +
+    "Continuer la réparation ?"
+  );
+  if (!confirmed) return;
+
   $repairBtn.disabled = true;
   $repairBtn.title = "Réparation en cours…";
   log("ok", isMacAppStoreChannel()

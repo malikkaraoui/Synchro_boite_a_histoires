@@ -314,13 +314,14 @@ fn write_story_files(
     // ── Index files ──────────────────────────────────────────────────────────
     on_progress("Écriture des index…");
 
-    let ri_data = story.ri_data();
+    let ri_data_raw = story.ri_data();
     let si_data = story.si_data();
     let li_data = story.li_data();
     let ni_data = story.ni_data()?;
 
     // ri, si, li : chiffrés avec la clé générique (premiers 512 octets)
-    fs::write(story_dir.join("ri"), storybox_crypto::cipher_story_data(&ri_data))
+    let ri_data_enc = storybox_crypto::cipher_story_data(&ri_data_raw);
+    fs::write(story_dir.join("ri"), &ri_data_enc)
         .map_err(|e| format!("Écriture ri échouée : {e}"))?;
     fs::write(story_dir.join("si"), storybox_crypto::cipher_story_data(&si_data))
         .map_err(|e| format!("Écriture si échouée : {e}"))?;
@@ -331,12 +332,14 @@ fn write_story_files(
     fs::write(story_dir.join("ni"), &ni_data)
         .map_err(|e| format!("Écriture ni échouée : {e}"))?;
 
-    // nm : NON chiffré — pour les histoires sans night mode, copie de si
-    fs::write(story_dir.join("nm"), &si_data)
-        .map_err(|e| format!("Écriture nm échouée : {e}"))?;
+    // nm : fichier vide si nightMode activé, absent sinon (référence StoryBox.QT)
+    if story.night_mode_available {
+        fs::write(story_dir.join("nm"), b"")
+            .map_err(|e| format!("Écriture nm échouée : {e}"))?;
+    }
 
-    // bt : cipher(ri_data[:64], device_key) — authorization token
-    let bt = storybox_crypto::make_bt_v2(&ri_data, device_key);
+    // bt : cipher(ri_chiffré[:64], device_key) — token d'autorisation firmware
+    let bt = storybox_crypto::make_bt_v2(&ri_data_enc, device_key);
     fs::write(story_dir.join("bt"), &bt)
         .map_err(|e| format!("Écriture bt échouée : {e}"))?;
 

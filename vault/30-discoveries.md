@@ -32,6 +32,19 @@
 - **Impact** : Toute communication réseau externe doit passer par une commande Tauri côté Rust (`reqwest`)
 - **Source** : CHANGELOG.md [2.0.2]
 
+### 2026-06-03 · Trois bugs critiques import V2 corrigés (histoires lisibles)
+- **Découverte** : L'import générait des histoires présentes sur la boîte mais illisibles à cause de 3 bugs combinés
+  1. `ni` byte 24 hardcodé à `1` → firmware cherchait `nm` même pour nightMode=false
+  2. `nm` écrit comme copie chiffrée de `si` → doit être vide (nightMode=true) ou absent (nightMode=false)
+  3. `bt` calculé sur `ri_data` brut → doit être `cipher(cipher(ri_raw)[:64], device_key)` (source : StoryBox.QT)
+- **Impact** : Après correction, les histoires MP3 importées se lisent correctement sur boîte V2
+- **Source** : `StoryBox.QT/pkg/api/device_storybox.py` + tests sur boîte physique
+
+### 2026-06-03 · "Réparer l'index" = outil de récupération, pas de réordonnancement
+- **Découverte** : L'index `.pi` est reconstruit automatiquement après chaque import/suppression. La réparation manuelle ne sert qu'en cas de crash, copie Finder, ou `.pi` corrompu. Elle NE change pas l'ordre — seul le drag-and-drop modifie l'ordre.
+- **Impact** : UI enrichie d'une boîte de confirmation avec explication contextuelle avant exécution
+- **Source** : `storybox_device.rs` + `main.js`
+
 ### 2026-05-22 · Entitlements macOS : app-sandbox désactivé
 - **Découverte** : `app-sandbox` désactivé dans `boite-app.entitlements` pour éviter les dialogues répétitifs d'accès au volume USB
 - **Impact** : L'app a un accès étendu au système — nécessaire pour la détection USB mais réduit le sandboxing de sécurité
