@@ -28,10 +28,13 @@
 ✅ 2026-05-22 · **V2.1.11** — Builds séparés Apple Silicon/Intel + workflow GitHub Windows
 ✅ 2026-05-22 · **V2.1.12** — Purge persistante anciennes boîtes UUID + fix doublon réglages
 ✅ 2026-05-25 · **Mac App Store** — Pipeline import natif Rust (storybox_crypto.rs + storybox_import.rs), 45/45 tests, commit 7f2f797
+✅ 2026-06-03 · **Import V2 validé** — 3 bugs critiques corrigés (bt, nm, nightMode byte), histoires lisibles sur device physique V2, 46/46 tests, commit 9ca90be
 
 ## Sur le feu
 
-- 🔌 **Validation device physique V2** — Tester import MP3 sur vraie boîte à histoires V2 USB avec `cargo tauri build --features mac-app-store`
+- 🍎 **Soumission App Store Connect** — build universel signé
+  - `cargo tauri build --bundles app --target universal-apple-darwin --config src-tauri/tauri.appstore.conf.json`
+  - Valider entitlement `com.apple.security.device.usb` sur build signé
 
 ## Ensuite
 

@@ -4,6 +4,13 @@
 
 ## Courrier entrant
 
+### 2026-06-03/05 — Session validation device V2 + corrections import [auto]
+
+- Source : Claude (claude-sonnet-4-6)
+- Statut : archivé
+- Résumé : 3 bugs critiques corrigés dans le pipeline d'import V2. (1) `ni` byte 24 hardcodé à `1` → firmware cherchait `nm` même si nightMode=false, corrigé en `self.night_mode_available as u8`. (2) `nm` écrit comme copie chiffrée de `si` → doit être fichier vide si nightMode=true ou absent sinon (référence StoryBox.QT). (3) `bt` calculé sur `ri_data` brut → doit être `cipher(cipher(ri_raw)[:64], device_key)`, corrigé en passant `ri_data_enc` à `make_bt_v2`. Validation sur device physique V2 réussie : les histoires MP3 importées se lisent. UI améliorée : confirmation native Tauri `ask()` avant réparation d'index avec explication contextuelle. 46/46 tests passent. Commit 9ca90be.
+- Prochaine action : soumission App Store Connect — build universel signé.
+
 ### 2026-05-25 — Session corrections prod + release v2.1.12 [auto]
 
 - Source : Claude (claude-sonnet-4-6)
