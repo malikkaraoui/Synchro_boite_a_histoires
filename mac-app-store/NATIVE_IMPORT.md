@@ -3,6 +3,12 @@
 **Date** : 2026-05-25  
 **Statut** : Pipeline implémenté, 45/45 tests passent, validation sur device physique requise
 
+> **Mise à jour 2026-09-30 (M0004).** Corrigé ici : il n'y a plus de feature Cargo
+> `mac-app-store`, ni de `reqwest`/`open` dans la variante (retirés en M0003, commit 6300ecf) ;
+> la commande de build et l'accès sandbox ont changé (§ Bloqueurs). L'import MP3 V2 a été
+> validé sur boîte physique le 2026-06-03 (commit 9ca90be). Le reste du rapport est l'état
+> du 2026-05-25. La variante fait foi dans `MAC_APP_STORE.md`.
+
 ---
 
 ## Contexte
@@ -112,9 +118,9 @@ Couverture : crypto (9), device (16), import (5), sync (5), story_pack (3), stud
 ### 1. Validation sur device physique (OBLIGATOIRE)
 
 Le crypto XXTEA doit être validé contre une vraie boîte à histoires V2 branchée en USB.  
-**Test à faire** :
+**Test à faire** (fait le 2026-06-03 pour au moins un MP3 ; matrice complète en M0005) :
 ```bash
-cargo tauri build --features mac-app-store
+npx --no-install tauri build --bundles app --config src-tauri/tauri.appstore.conf.json
 # brancher boîte à histoires V2
 # importer un MP3 de test depuis l'app
 # vérifier que l'histoire apparaît et est lisible sur la boîte
@@ -129,21 +135,24 @@ Les boîte à histoires V3 (firmware récent, `.md[0]` ≥ 6) utilisent AES-128-
 - Chiffrement : AES-128-CBC (crate `aes` + `cbc`)
 - Ajouter `aes = "0.8"` + `cbc = "0.1"` + `block-padding = "0.3"` dans Cargo.toml
 
-### 3. Validation sandbox USB
+### 3. Accès sandbox à la boîte
 
-En mode sandbox App Store, l'accès aux volumes amovibles montés automatiquement n'est pas encore validé. L'entitlement `com.apple.security.device.usb` est présent mais doit être testé avec un vrai build signé via App Store Connect.
+Mesuré en M0003 : sous sandbox, la boîte est visible (`stat`) mais illisible tant que
+l'utilisateur ne l'a pas choisie. Livré en M0004 : état `access_required`, bouton
+« Autoriser l'accès à la boîte » (NSOpenPanel) et bookmarks security-scoped persistants.
+Le mécanisme est décrit dans `MAC_APP_STORE.md`, section « Accès sandbox ».
+L'entitlement `device.usb` n'y joue aucun rôle.
 
 ### 4. Soumission App Store Connect
 
-Commande de build correcte (exclut reqwest/open du binaire) :
+Commande de build (celle de `build-mac-app-store.sh` et `npm run build:mac-app-store`) :
 ```bash
-# À ajouter dans build-mac-app-store.sh
-cargo tauri build \
+npx --no-install tauri build \
   --bundles app \
   --target universal-apple-darwin \
   --config src-tauri/tauri.appstore.conf.json \
   --ci
-# (reqwest/open restent compilés mais les chemins de code sont #[cfg] exclus)
+# reqwest et open ne sont plus des dépendances : rien de réseau n'est compilé.
 ```
 
 ---

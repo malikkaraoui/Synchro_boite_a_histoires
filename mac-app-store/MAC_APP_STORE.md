@@ -1,112 +1,118 @@
-# Objectif
+# Variante Mac App Store
 
-Préparer une variante `Mac App Store` de `Synchro Boîte à histoires` sans casser la distribution directe actuelle.
+> **État au 2026-09-30 (M0004).** Ce document fait foi pour la variante `mac-app-store/`.
+> Il remplace la version de préparation (bridge Python, feature Cargo `mac-app-store`,
+> import audio désactivé), aujourd'hui caduque. Le détail de l'import natif est dans
+> `NATIVE_IMPORT.md`, l'audit des écarts dans `vault/revues/2026-09-30-M0003-audit-app-store.md`.
 
-## Ce qui a été préparé
+Objectif : publier `Synchro Boîte à histoires` sur le Mac App Store sans toucher à la
+distribution directe (`src-tauri/` + `boite-bridge.py` à la racine du dépôt).
 
-- une config Tauri dédiée : `src-tauri/tauri.appstore.conf.json`
-- un jeu d’entitlements sandbox dédié : `boite-app-store.entitlements`
-- une feature Cargo dédiée : `mac-app-store`
-- la désactivation de l’auto-update GitHub pour cette variante
-- un script de build dédié : `build-mac-app-store.sh`
-- le retrait du plugin Tauri Shell inutilisé pour réduire la surface de permissions
+## Ce que contient la variante
 
-## Commande de build
+- 100 % Rust + front web statique : aucun Python, aucun téléchargement de code au runtime,
+  aucun appel réseau (ni `reqwest`, ni `open`, ni entitlement `network`).
+- Import MP3 natif : génération du pack, chiffrement XXTEA V2, écriture `.content/`,
+  index `.pi`, sidecar (voir `NATIVE_IMPORT.md`).
+- Détection, inventaire, suppression, réordonnancement et réparation d'index en Rust.
+- Mises à jour gérées par le Mac App Store (pas d'updater GitHub).
+- Accès sandbox à la boîte et au dossier audio par sélection utilisateur et bookmarks
+  security-scoped (section suivante).
+- Config Tauri dédiée : `src-tauri/tauri.appstore.conf.json` (identifiant
+  `com.malikkaraoui.synchro-boite-a-histoires`, manifeste `PrivacyInfo.xcprivacy` copié
+  dans `Contents/Resources/`). Il n'y a plus de feature Cargo `mac-app-store`.
 
-Depuis la racine du repo :
-
-- `./build-mac-app-store.sh`
-
-ou, si tu préfères via npm :
-
-- `npm run build:mac-app-store`
-
-## Différence de comportement
-
-Avec la variante `mac-app-store` :
-
-- l’écran de splash affiche `Mises à jour via le Mac App Store`
-- la recherche de mise à jour dans les réglages ne pointe plus vers GitHub
-- le mécanisme `download_and_install_update()` est désactivé
-- le bridge Python n’est plus lancé dans le build App Store
-- l’import audio est volontairement désactivé en attendant un remplaçant natif conforme
-- la réparation d’index est maintenant assurée nativement en Rust
-- le post-traitement des packs (`story.json` + couverture PNG placeholder) dispose maintenant d’un module Rust natif testé
-- le parsing STUdio de `story.json` et la génération des buffers `ri` / `si` / `li` / `ni` disposent maintenant d’un module Rust natif testé
-- la suppression, la lecture d’inventaire et la réorganisation restent sur le chemin Rust natif
-
-## Bloqueurs réels avant soumission App Store
-
-### 1. Remplacement natif du bridge encore manquant
-
-Le build App Store ne lance plus `boite-bridge.py` ni de Python externe.
-
-En revanche, pour retrouver la fonction d’import audio dans une version publiable, il faut encore remplacer le bridge par une implémentation native/signée conforme App Store.
-
-Fichier concerné côté chantier : `boite-bridge.py`
-
-### 2. Téléchargement de code/ressources au runtime
-
-Le bridge Python historique :
-
-- clone `StoryBox.QT` depuis GitHub
-- télécharge `studio-pack-generator`
-- écrit tout cela dans `~/.synchro_boite_a_histoires`
-
-Le build App Store n’emprunte plus ce chemin à l’exécution, mais ce bootstrap doit toujours disparaître du chantier avant un vrai remplacement fonctionnel.
-
-Ça entre en collision avec les règles App Store sur les apps autoportées, sandboxées, et qui ne doivent pas télécharger/installer du code ou des composants modifiant la fonctionnalité après review.
-
-### 3. Sandbox et accès à la boîte à histoires
-
-La variante App Store active :
+Entitlements (`boite-app-store.entitlements`) :
 
 - `com.apple.security.app-sandbox`
-- `com.apple.security.network.client`
 - `com.apple.security.files.user-selected.read-write`
-- `com.apple.security.device.usb`
+- `com.apple.security.files.bookmarks.app-scope`
+- `com.apple.security.device.usb` (probablement inutile : l'app ne fait que des E/S fichiers
+  sur un volume monté ; à retirer après validation de l'accès sandbox, écart E10)
 
-Mais le point critique reste à valider :
+## Accès sandbox
 
-- l’app détecte et manipule la boîte à histoires montée en USB comme volume monté automatiquement
-- en sandbox App Store, il faudra peut-être passer par une sélection utilisateur explicite du volume, ou une autre stratégie compatible sandbox
+### Le piège
 
-### 4. Soumission finale
+Sous sandbox, lister `/Volumes` et faire un `stat` sur `/Volumes/<BOÎTE>/.md` sont
+**autorisés**, mais lire ou écrire dans la boîte est **refusé** (`EPERM`) tant que
+l'utilisateur ne l'a pas choisie dans le sélecteur de fichiers de macOS (NSOpenPanel).
+Une détection fondée sur `exists()` croit donc la boîte connectée, puis tout échoue.
+Même chose pour le dossier audio : son chemin mémorisé est illisible au lancement suivant.
 
-La soumission réelle Mac App Store devra se faire via Xcode / App Store Connect avec :
+### Le mécanisme livré
 
-- signature App Store correcte
-- archive `.app` / `.pkg` conforme
-- provisioning profile Mac App Store
-- validation sandbox réelle sur machine propre
+1. **Détection** (`storybox_device.rs`) : une boîte n'est `connected` que si `.md` se lit
+   (`fs::read`). Présente mais illisible, elle est `access_required`, avec son point de
+   montage (champ `state` de `StoryBoxDeviceProbe`).
+2. **Autorisation** (`main.js`) : dans l'état `access_required`, l'app affiche « Autoriser
+   l'accès à la boîte ». Le bouton ouvre le NSOpenPanel (`tauri-plugin-dialog`,
+   `directory: true`, `defaultPath` = point de montage détecté). La commande
+   `grant_device_access` vérifie que le dossier choisi est bien une boîte lisible.
+3. **Persistance** (`sandbox_access.rs`, `app_settings.rs`) : un bookmark security-scoped
+   (`NSURL bookmarkDataWithOptions: WithSecurityScope`, via `objc2-foundation`, déjà
+   présent dans `Cargo.lock` par Tauri) est enregistré dans `settings.json`, dans le
+   conteneur de l'app :
+   - `deviceBookmarks` : une entrée par boîte, clé `serial-<numéro de série>` (le même
+     `device_id` que pour le nom de la boîte) ;
+   - `audioFolderBookmark` : le dossier audio.
+   Les bookmarks sont stockés en hexadécimal.
+4. **Au lancement / au branchement** : si la boîte est `access_required`, l'app résout ses
+   bookmarks (`URLByResolvingBookmarkData`, sans monter de volume ni afficher d'UI), garde
+   celui qui pointe vers ce point de montage **et** dont le numéro de série correspond,
+   appelle `startAccessingSecurityScopedResource`, et régénère le bookmark s'il est périmé.
+   Le dossier audio n'est rouvert que par son bookmark (`restore_audio_folder`) :
+   `lastAudioFolder` seul n'est plus relu.
+5. **Fermeture de l'accès** : `stopAccessingSecurityScopedResource` quand la boîte n'est
+   plus détectée (débranchée ou éjectée depuis le Finder), quand on change de dossier audio,
+   et à la fermeture de l'app (`RunEvent::Exit`).
+6. **Montage validé** : l'état Rust `SandboxAccess` garde le point de montage validé.
+   `get_storybox_inventory`, `check_story_on_device` et `scan_and_plan` l'utilisent au lieu
+   de reparcourir `/Volumes` ; les commandes d'écriture (import, suppression, ordre,
+   réparation, sidecar) sont refusées si le montage transmis n'est plus celui-là.
+7. **Erreurs visibles** : une erreur d'inventaire s'affiche à la place de la liste
+   (plus de liste vide sans explication).
 
-## Recommandation pragmatique
+### Ce qui est prouvé, et ce qui ne l'est pas
 
-Pour rendre `Synchro Boîte à histoires` réellement publiable sur le Mac App Store, la prochaine étape sérieuse est :
+- Prouvé (M0004) : sous sandbox, sur une image FAT32 de test, le code de détection renvoie
+  `access_required` (et `connected` hors sandbox) ; un bookmark ne peut pas être créé sans
+  sélection utilisateur ; hors sandbox, un bookmark se crée et se résout vers le même
+  dossier (test `bookmark_roundtrip_resolves_same_directory`).
+- **Non prouvé** : le parcours complet NSOpenPanel → bookmark → relance sur une vraie boîte.
+  Il demande un clic humain : checklist fondateur du rapport M0004.
 
-1. supprimer la dépendance au Python externe
-2. supprimer le bootstrap réseau au runtime
-3. intégrer les composants nécessaires dans le bundle signé, ou réécrire le bridge en Rust / sidecar natif signé
-4. valider l’accès à la boîte à histoires en mode sandbox
+## Build
 
-## Conclusion franche
+Depuis `mac-app-store/` (après `npm ci`) :
 
-La base `Mac App Store` est maintenant préparée côté build/config/update.
+- `./build-mac-app-store.sh` ou `npm run build:mac-app-store` : bundle `.app`
+  `universal-apple-darwin`. Nécessite les cibles `aarch64-apple-darwin` **et**
+  `x86_64-apple-darwin` (`rustup target add x86_64-apple-darwin`).
+- `npm run verify` : `cargo check` + `cargo test`.
 
-En revanche, **la soumission App Store n’est pas encore viable telle quelle** tant que le remplaçant natif du bridge n’existe pas et que la stratégie sandbox boîte à histoires n’est pas validée.
+Test local sandboxé (signature ad hoc, sans certificat) :
 
-## Avancement du pipeline natif restant
+```sh
+npx --no-install tauri build --bundles app --target aarch64-apple-darwin \
+  --config src-tauri/tauri.appstore.conf.json --ci
+APP="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Synchro Boîte à histoires.app"
+codesign -s - -f --deep --entitlements boite-app-store.entitlements "$APP"
+codesign -d --entitlements - "$APP"   # doit lister les 4 entitlements ci-dessus
+```
 
-Déjà porté en Rust dans `mac-app-store/src-tauri/src/` :
+## Bloqueurs restants avant soumission
 
-- `storybox_device.rs` : détection, inventaire, ordre, réparation d’index
-- `storybox_sync.rs` : scan audio, hashes, sidecars, suppressions
-- `story_pack.rs` : post-traitement du ZIP STUdio
-- `studio_story.rs` : parsing de `story.json` + génération `ri` / `si` / `li` / `ni`
+1. **Validation humaine de l'accès sandbox** sur une vraie boîte (checklist M0004).
+2. **Formats audio** (G4, M0005) : matrice de lecture MP3 sur boîte physique ; WAV à
+   convertir nativement (le listing n'affiche que les `.mp3` en attendant).
+3. **Boîtes V3** (G6, décision fondateur : obligatoire en v1) : AES-128-CBC non géré.
+4. **Chaîne de signature** (G7) : certificats « Apple Distribution » et « Mac Installer
+   Distribution », profil de provisioning Mac App Store, fiche App Store Connect,
+   `.pkg` universel signé.
+5. **Machine propre** (G8) : installation via TestFlight et scénario complet.
+6. **Métadonnées** (G10) : retirer la marque tierce des mots-clés et du sous-titre
+   (`APP_STORE_CONTENT.md`).
 
-Reste à porter pour un import audio App Store complet :
-
-1. mapping final des fichiers STUdio vers les chemins boîte à histoires (`rf/000/*`, `sf/000/*`, `bt`, `li`, `si`, `ni`, `ri`, `nm`)
-2. chiffrement / renommage natif équivalent à `__get_ciphered_name()` et `__get_ciphered_data()`
-3. écriture complète dans `.content/<short_uuid>/`
-4. mise à jour d’inventaire + sidecar + gestion d’échec/rollback pendant import
+Attention : l'identifiant de bundle fixe aussi le chemin du conteneur sandbox. En changer
+après publication ferait perdre les réglages et les bookmarks.

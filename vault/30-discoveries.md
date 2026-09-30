@@ -82,6 +82,8 @@
 
 ### 2026-05-25 · App Store : reqwest/open non-utilisables au runtime mais compilables
 
+> ⚠️ **RÉVOQUÉE le 2026-09-30** — voir l'entrée « 2026-09-30 · Révocation : reqwest/open ne restent pas ». Texte d'origine conservé ci-dessous.
+
 - **Découverte** : Les crates `reqwest` et `open` peuvent rester dans Cargo.toml sans violer les règles App Store — l'important est que les chemins de code qui les appellent soient exclus via `#[cfg(not(feature = "mac-app-store"))]`. Apple inspecte le comportement runtime, pas les symboles compilés inactifs.
 - **Source** : `mac-app-store/NATIVE_IMPORT.md §Bloqueurs`
 
@@ -92,3 +94,24 @@
 - **Correctif** : lib **vendorisée** — seul `pkg/` (≈420K, le sidecar n'importe que `pkg.api.*`) est versionné et embarqué dans les resources Tauri (`../StoryBox.QT/pkg`). `_bootstrap_storybox_qt` copie désormais la copie locale, **plus aucun `git clone`**. `resources_rc.py` (3,5 Mo) et `tools/*.exe` exclus (GUI/Windows only, non importés).
 - **Vérifié** : chaîne `from pkg.api.device_storybox import StoryBoxDevice` OK avec le python de l'app (python.org 3.13.9 ; deps présentes : psutil, xxtea, pycryptodome, py7zr, PIL, PySide6).
 - **Source** : `boite-bridge.py:40-55`, `.gitignore`, `src-tauri/tauri.conf.json:30`, `StoryBox.QT/pkg/api/devices.py` (familles `is_storybox`/`is_flam`)
+
+### 2026-09-30 · Révocation : reqwest/open ne restent pas dans la variante App Store
+
+- **Découverte** : l'entrée du 2026-05-25 (« reqwest et open peuvent rester dans Cargo.toml ») est révoquée. Décision fondateur 2026-09-30 (« AUCUNE dépendance ! », spec `vault/decisions/2026-09-30-SPEC-app-store-rust.md`) : la variante est 100 % Rust sans pile réseau. `reqwest`, `open` et la feature Cargo `mac-app-store` ont été retirés en M0003 (commit 6300ecf).
+- **Vérifié (M0004)** : `cargo tree -e normal | grep -iE "reqwest|hyper|rustls|ureq|native-tls|openssl|open v"` vide dans `mac-app-store/src-tauri` (contrôle positif : la même commande trouve `objc2-foundation`/`serde_json`) ; aucun entitlement `network`.
+- **Impact** : toute doc qui mentionne `--features mac-app-store` ou « reqwest/open restent compilés » est fausse (corrigé dans `NATIVE_IMPORT.md` et `MAC_APP_STORE.md`, M0004).
+- **Source** : `mac-app-store/src-tauri/Cargo.toml`, audit `vault/revues/2026-09-30-M0003-audit-app-store.md` (G9, E4, E5)
+
+### 2026-09-30 · Piège sandbox : `stat` autorisé, lecture interdite sur la boîte
+
+- **Découverte** : sous App Sandbox, `read_dir("/Volumes")` et `Path::exists()` sur `/Volumes/<BOÎTE>/.md` réussissent, mais `fs::read(.md)`, la lecture de `.content/` et toute écriture renvoient `EPERM` (« Operation not permitted », os error 1) tant que l'utilisateur n'a pas choisi la boîte dans le NSOpenPanel. Même chose pour un dossier audio mémorisé (`~/Music`, `~/Documents`). Une détection fondée sur `exists()` déclare donc la boîte « connectée » puis tout échoue, et masquait le bouton de sélection.
+- **Mesure (M0004)** : sonde incluant le vrai `storybox_device.rs`, bundle signé ad hoc avec `boite-app-store.entitlements` (conteneur `~/Library/Containers/com.example.sbxprobe-m0004`), image FAT32 `SBXTEST` avec `.md` + `.content/` : hors sandbox `state=connected` ; sous sandbox `stat .md exists = true`, `fs::read(.md) = EPERM`, `probe_storybox_device()` → `state=access_required`. `create_bookmark` sans sélection utilisateur échoue (« The file “SBXTEST” couldn’t be opened »).
+- **Correctif** : critère « `.md` lisible » + état `access_required` + NSOpenPanel + bookmark security-scoped persistant (entitlement `files.bookmarks.app-scope`). Voir `mac-app-store/MAC_APP_STORE.md` § « Accès sandbox ».
+- **Leçon (transverse)** : sous sandbox, l'existence d'un fichier ne prouve pas qu'on peut le lire ; tester la capacité réellement utilisée (lecture), jamais un proxy (`stat`).
+- **Source** : audit M0003 (G2), rapport M0004 (`vault/echanges/F01.md`)
+
+### 2026-09-30 · objc2-foundation : `bookmarkDataWithOptions…` exige aussi la feature `NSArray`
+
+- **Découverte** : la méthode `NSURL::bookmarkDataWithOptions_includingResourceValuesForKeys_relativeToURL_error` n'existe qu'avec les features `NSArray` + `NSData` + `NSError` + `NSString`. L'app compilait sans `NSArray` déclarée uniquement parce que Tauri l'active (unification de features) ; la sonde autonome, elle, a échoué (`E0599`).
+- **Impact** : `NSArray` est déclarée explicitement dans `mac-app-store/src-tauri/Cargo.toml`, pour ne pas dépendre des features activées par une autre crate.
+- **Source** : `objc2-foundation-0.3.2/src/generated/NSURL.rs:1449-1458`, compilation de la sonde M0004
