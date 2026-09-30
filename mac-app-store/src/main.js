@@ -418,6 +418,7 @@ async function pollDevice() {
       const needsAccess = probe.state === "access_required" && !!probe.mount;
       accessMount = needsAccess ? probe.mount : null;
       deviceMount = null;
+      deviceId = null;
       deviceStories = [];
       pendingDeletes.clear();
       $deviceBadge.className = "device-badge " + (needsAccess ? "badge-access" : "badge-disconnected");
@@ -445,6 +446,7 @@ async function pollDevice() {
     }
   } catch (e) {
     deviceMount = null;
+    deviceId = null;
     log("err", `Détection de la boîte échouée : ${e}`);
   }
   refreshFolderBadges();
@@ -772,7 +774,7 @@ async function reorderStory(shortUuid, newIndex) {
   renderDeviceList();
 
   try {
-    await invoke("reorder_story_in_pack_index", { mount: deviceMount, shortUuid, newIndex });
+    await invoke("reorder_story_in_pack_index", { mount: deviceMount, deviceId, shortUuid, newIndex });
     await refreshDeviceInventory();
 
     const persistedIndex = deviceStories.findIndex(s => s.shortUuid === shortUuid);
@@ -1076,7 +1078,7 @@ async function startSync() {
   let deleted = 0;
   for (const uuid of toDelete) {
     try {
-      await invoke("remove_orphan_story", { mount: deviceMount, shortUuid: uuid });
+      await invoke("remove_orphan_story", { mount: deviceMount, deviceId, shortUuid: uuid });
       log("ok", `🗑 Supprimé : ${uuid}`);
       deleted++;
     } catch (e) {
@@ -1095,7 +1097,7 @@ async function startSync() {
   try {
     if (selectedFiles.length > 0) {
       showSyncStatus("Transfert en cours…", 0, totalFiles);
-      await invoke("start_sync", { folderPath, deviceMount, selectedFiles });
+      await invoke("start_sync", { folderPath, deviceMount, deviceId, selectedFiles });
     }
     pendingIds.clear();
     pendingDeletes.clear();
@@ -1259,7 +1261,7 @@ $repairBtn.addEventListener("click", async () => {
     : "Réparation de l'index en cours…");
   $logDrawer.classList.remove("hidden");
   try {
-    await invoke("repair_pack_index", { deviceMount });
+    await invoke("repair_pack_index", { deviceMount, deviceId });
     log("ok", isMacAppStoreChannel()
       ? "Index réparé nativement — redémarre la boîte à histoires pour voir les histoires."
       : "Index réparé — redémarre la boîte à histoires pour voir les histoires.");

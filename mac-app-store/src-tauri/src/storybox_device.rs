@@ -187,16 +187,7 @@ impl StoryBoxDeviceProbe {
     fn connected(mount: PathBuf, detection_method: &str, marker_found: bool) -> Self {
         let content_dir = mount.join(".content");
         let story_dir_count = count_story_dirs(&content_dir);
-        let mount_str = mount.to_str().unwrap_or("");
-
-        // Utilise le numéro de série hardware (stable) en priorité,
-        // sinon le Volume UUID macOS (peut changer sur FAT entre montages).
-        let info = read_device_info(mount_str);
-        let device_id = if !info.serial.is_empty() && info.serial != "000000000000000000" {
-            Some(format!("serial-{}", info.serial))
-        } else {
-            get_volume_id(mount_str)
-        };
+        let device_id = read_device_id(&mount);
 
         Self {
             state: DeviceState::Connected,
@@ -222,6 +213,18 @@ impl StoryBoxDeviceProbe {
             story_dir_count: 0,
             detection_method: Some(detection_method.to_string()),
         }
+    }
+}
+
+/// Identité de la boîte montée en `mount`, relue sur le matériel à chaque appel :
+/// le numéro de série (stable) en priorité, sinon un identifiant dérivé du montage.
+pub fn read_device_id(mount: &Path) -> Option<String> {
+    let mount_str = mount.to_str().unwrap_or("");
+    let info = read_device_info(mount_str);
+    if !info.serial.is_empty() && info.serial != "000000000000000000" {
+        Some(format!("serial-{}", info.serial))
+    } else {
+        get_volume_id(mount_str)
     }
 }
 

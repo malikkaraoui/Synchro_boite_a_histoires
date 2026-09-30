@@ -25,19 +25,15 @@ use tauri::{Emitter, Manager, State};
 /// et, si la boîte y est illisible (sandbox), on tente de rouvrir l'accès par son bookmark.
 #[tauri::command]
 fn probe_storybox_device(app: tauri::AppHandle, access: State<'_, SandboxAccess>) -> StoryBoxDeviceProbe {
-    if let Some(mount) = access.validated_mount() {
-        let probe = storybox_device::probe_mount(Path::new(&mount));
-        if probe.connected {
-            return probe;
-        }
-        // Débranchée, éjectée ou redevenue illisible : `stopAccessing…` au drop.
-        access.clear_device();
+    // Même montage ET même numéro de série ; sinon l'accès est refermé (`stop…` au drop).
+    if let Some(probe) = access.reprobe_validated() {
+        return probe;
     }
 
     let probe = storybox_device::probe_storybox_device();
     match (probe.state, probe.mount.clone()) {
         (DeviceState::Connected, Some(mount)) => {
-            access.set_device(mount, None);
+            access.set_device(mount, probe.device_id.clone(), None);
             probe
         }
         (DeviceState::AccessRequired, Some(mount)) => {
@@ -75,7 +71,7 @@ fn restore_device_access(
                 Err(e) => eprintln!("[sandbox] bookmark boîte périmé non régénéré : {e}"),
             }
         }
-        access.set_device(mount.to_string(), Some(resolved.access));
+        access.set_device(mount.to_string(), probe.device_id.clone(), Some(resolved.access));
         return Some(probe);
     }
     None
@@ -112,7 +108,7 @@ fn grant_device_access(
     if let Some(w) = &warning {
         eprintln!("[sandbox] {w}");
     }
-    access.set_device(path, None);
+    access.set_device(path, probe.device_id.clone(), None);
     Ok(DeviceAccessGrant { remembered: warning.is_none(), warning, probe })
 }
 
@@ -227,17 +223,23 @@ fn scan_and_plan(access: State<'_, SandboxAccess>, folder_path: String) -> Resul
 fn write_sidecar_after_push(
     access: State<'_, SandboxAccess>,
     mount: String,
+    device_id: String,
     short_uuid: String,
     story_id: String,
     hash: String,
 ) -> Result<(), String> {
-    access.require_mount(&mount)?;
+    access.require_mount(&mount, &device_id)?;
     storybox_sync::write_sidecar(&mount, &short_uuid, &story_id, &hash)
 }
 
 #[tauri::command]
-fn remove_orphan_story(access: State<'_, SandboxAccess>, mount: String, short_uuid: String) -> Result<(), String> {
-    access.require_mount(&mount)?;
+fn remove_orphan_story(
+    access: State<'_, SandboxAccess>,
+    mount: String,
+    device_id: String,
+    short_uuid: String,
+) -> Result<(), String> {
+    access.require_mount(&mount, &device_id)?;
     storybox_sync::remove_orphan_story(&mount, &short_uuid)
 }
 
@@ -245,10 +247,11 @@ fn remove_orphan_story(access: State<'_, SandboxAccess>, mount: String, short_uu
 fn move_story_in_pack_index(
     access: State<'_, SandboxAccess>,
     mount: String,
+    device_id: String,
     short_uuid: String,
     direction: i32,
 ) -> Result<(), String> {
-    access.require_mount(&mount)?;
+    access.require_mount(&mount, &device_id)?;
     storybox_device::move_story_in_pack_index(&mount, &short_uuid, direction)
 }
 
@@ -256,10 +259,11 @@ fn move_story_in_pack_index(
 fn reorder_story_in_pack_index(
     access: State<'_, SandboxAccess>,
     mount: String,
+    device_id: String,
     short_uuid: String,
     new_index: usize,
 ) -> Result<(), String> {
-    access.require_mount(&mount)?;
+    access.require_mount(&mount, &device_id)?;
     storybox_device::reorder_story_in_pack_index(&mount, &short_uuid, new_index)
 }
 
@@ -337,10 +341,11 @@ async fn start_sync(
     access: State<'_, SandboxAccess>,
     folder_path: String,
     device_mount: String,
+    device_id: String,
     selected_files: Vec<String>,
 ) -> Result<String, String> {
     let _ = folder_path;
-    access.require_mount(&device_mount)?;
+    access.require_mount(&device_mount, &device_id)?;
     let total = selected_files.len();
     emit_sync_line(&app, serde_json::json!({
         "type": "progress", "step": "scan",
@@ -351,6 +356,13 @@ async fn start_sync(
     let mut errors = 0u32;
 
     for (i, audio_path_str) in selected_files.iter().enumerate() {
+        // Avant chaque fichier : toujours la même boîte physique (numéro de série relu).
+        if let Err(e) = access.require_mount(&device_mount, &device_id) {
+            emit_sync_line(&app, serde_json::json!({"type":"error","message":e}));
+            errors += (total - i) as u32;
+            break;
+        }
+
         let audio_path = std::path::Path::new(audio_path_str);
         let display = audio_path
             .file_name()
@@ -430,8 +442,12 @@ fn emit_sync_line(app: &tauri::AppHandle, payload: serde_json::Value) {
 
 /// Répare le fichier d'index (.pi) de la boîte à histoires en pur Rust.
 #[tauri::command]
-async fn repair_pack_index(access: State<'_, SandboxAccess>, device_mount: String) -> Result<String, String> {
-    access.require_mount(&device_mount)?;
+async fn repair_pack_index(
+    access: State<'_, SandboxAccess>,
+    device_mount: String,
+    device_id: String,
+) -> Result<String, String> {
+    access.require_mount(&device_mount, &device_id)?;
     storybox_device::repair_pack_index_native(&device_mount)?;
     Ok("ok".to_string())
 }
