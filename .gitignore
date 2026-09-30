@@ -10,7 +10,11 @@ build/
 dist/
 *.pyc
 .DS_Store
-StoryBox.QT/
+# StoryBox.QT : on ne versionne que le package Python pkg/ (le sidecar n'importe que pkg.api.*)
+# Le reste (resources_rc.py 3,5 Mo, res/, tools/*.exe, .git imbriqué) reste hors du dépôt.
+StoryBox.QT/*
+!StoryBox.QT/pkg/
+StoryBox.QT/pkg/**/__pycache__/
 studio-pack-generator
 studio-pack-generator.exe
 tools/
@@ -22,3 +26,37 @@ spg-extracted/
 boite-app-win.spec
 boite-sync.ico
 mac-app-store/src-tauri/target/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# harnais:registres -- marqueur d'idempotence, ne pas retirer (le bootstrap le cherche)
+# Registres d'exécution de l'orchestration — À AJOUTER AU .gitignore DU PROJET
+#
+# POURQUOI : ces deux fichiers sont un ÉTAT, pas une configuration. Ils sont écrits en
+# parallèle par l'orchestrateur et par chaque fenêtre, en continu, sans jamais être committés
+# par personne. Versionnés, ils produisent trois dégâts, tous observés :
+#   1. l'arbre de travail est sale en permanence, donc les intégrations se bloquent ;
+#   2. chaque branche en porte une version divergente, donc chaque merge les met en conflit —
+#      et un conflit sur un journal append-only n'a pas de résolution sensée ;
+#   3. une intégration `ff-only` échoue sur un fichier que personne n'a voulu modifier.
+# Hors git, ces trois problèmes disparaissent définitivement.
+#
+# CONTREPARTIE ASSUMÉE : plus d'historique git de ces registres, et pas de copie sur le dépôt
+# distant. Ils restent lisibles sur disque, `events.jsonl` reste append-only, et la preuve de
+# ce qui s'est passé reste le dépôt lui-même (commits, SHA, refs) — jamais le registre.
+#
+# IGNORER FICHIER PAR FICHIER, SURTOUT PAS `vault/runtime/` EN ENTIER : le `README.md` de ce
+# dossier porte la doctrine (état / événement / preuve, contrat heartbeat, réconciliation,
+# vocabulaire d'événement figé). C'est de la documentation, elle DOIT rester versionnée.
+# ─────────────────────────────────────────────────────────────────────────────
+
+vault/runtime/state.json
+vault/runtime/events.jsonl
+
+# Si le projet fait vivre plusieurs vaults (monorepo), préférer les motifs :
+#   **/vault/runtime/state.json
+#   **/vault/runtime/events.jsonl
+
+# Verrous et fichiers temporaires d'écriture atomique, s'il y en a : jamais suivis non plus.
+# Après un arrêt brutal, un verrou périmé committé bloquerait tout le monde.
+# vault/runtime/*.verrou
+# vault/runtime/*.tmp-*

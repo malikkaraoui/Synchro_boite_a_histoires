@@ -38,14 +38,21 @@ def emit(msg_type: str, **kwargs) -> None:
 
 # ── Bootstrap StoryBox.QT ────────────────────────────────────────────────────────
 def _bootstrap_storybox_qt() -> None:
+    # La bibliothèque est vendorisée à côté du script (repo dev ou bundle .app),
+    # jamais clonée au runtime — aucun repo GitHub à recloner, aucune dépendance réseau.
     if STORYBOX_QT_DIR.is_dir():
         return
-    emit("progress", step="setup", message="Clonage de StoryBox.QT…")
-    subprocess.run(
-        ["git", "clone", "--quiet", "https://github.com/o-daneel/StoryBox.QT.git", str(STORYBOX_QT_DIR)],
-        check=True,
-    )
-    emit("progress", step="setup", message="StoryBox.QT cloné.")
+    vendored = SCRIPT_DIR / "StoryBox.QT"
+    if vendored.is_dir():
+        emit("progress", step="setup", message="Initialisation de la bibliothèque StoryBox…")
+        shutil.copytree(
+            vendored, STORYBOX_QT_DIR,
+            ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"),
+        )
+        emit("progress", step="setup", message="Bibliothèque StoryBox prête.")
+        return
+    emit("error", message="Bibliothèque StoryBox introuvable — réinstalle l'application.")
+    sys.exit(1)
 
 
 # ── Bootstrap SPG ─────────────────────────────────────────────────────────────
