@@ -1,0 +1,180 @@
+### md6_taille100
+resultat: Err(Fichier .md V3 non reconnu (version 6, 100 octets). Rien n'a été écrit sur la boîte.)
+etat_identique: true
+avant: 7 entrees, apres: 7 entrees
+supprimes: []
+ajoutes: []
+modifies: []
+pi_apres: 11223344556677889900aabbaabbccdd
+
+### md6_taille512
+resultat: Err(Fichier .md V3 non reconnu (version 6, 512 octets). Rien n'a été écrit sur la boîte.)
+etat_identique: true
+avant: 7 entrees, apres: 7 entrees
+supprimes: []
+ajoutes: []
+modifies: []
+pi_apres: 11223344556677889900aabbaabbccdd
+
+### md7_taille129
+resultat: Err(Fichier .md V3 non reconnu (version 7, 129 octets). Rien n'a été écrit sur la boîte.)
+etat_identique: true
+avant: 7 entrees, apres: 7 entrees
+supprimes: []
+ajoutes: []
+modifies: []
+pi_apres: 11223344556677889900aabbaabbccdd
+
+### md6_snu_non_hexa
+resultat: Err(Fichier .md V3 illisible : numéro de série invalide (7F0GA1B2C3D4E5))
+etat_identique: true
+avant: 7 entrees, apres: 7 entrees
+supprimes: []
+ajoutes: []
+modifies: []
+pi_apres: 11223344556677889900aabbaabbccdd
+
+### md7_snu_espace
+resultat: Err(Fichier .md V3 illisible : numéro de série invalide ( EADBEEF123456))
+etat_identique: true
+avant: 7 entrees, apres: 7 entrees
+supprimes: []
+ajoutes: []
+modifies: []
+pi_apres: 11223344556677889900aabbaabbccdd
+
+### md_v8
+resultat: Err(Boîte V3 récente : clés non disponibles (fichier .md v8). Cette boîte n'est pas encore prise en charge ; rien n'a été écrit sur la boîte.)
+etat_identique: true
+avant: 7 entrees, apres: 7 entrees
+supprimes: []
+ajoutes: []
+modifies: []
+pi_apres: 11223344556677889900aabbaabbccdd
+
+### md_v42
+resultat: Err(Boîte V3 récente : clés non disponibles (fichier .md v42). Cette boîte n'est pas encore prise en charge ; rien n'a été écrit sur la boîte.)
+etat_identique: true
+avant: 7 entrees, apres: 7 entrees
+supprimes: []
+ajoutes: []
+modifies: []
+pi_apres: 11223344556677889900aabbaabbccdd
+
+### md6_octet1_non_nul_u16_262
+resultat: Err(Boîte V3 récente : clés non disponibles (fichier .md v262). Cette boîte n'est pas encore prise en charge ; rien n'a été écrit sur la boîte.)
+etat_identique: true
+avant: 7 entrees, apres: 7 entrees
+supprimes: []
+ajoutes: []
+modifies: []
+pi_apres: 11223344556677889900aabbaabbccdd
+
+### md_vide
+resultat: Err(Fichier .md trop court pour V2 (taille : 0 octets, attendu ≥ 512))
+etat_identique: true
+avant: 7 entrees, apres: 7 entrees
+supprimes: []
+ajoutes: []
+modifies: []
+pi_apres: 11223344556677889900aabbaabbccdd
+
+### md_tronque_1o
+resultat: Err(Fichier .md V3 illisible : trop court)
+etat_identique: true
+avant: 7 entrees, apres: 7 entrees
+supprimes: []
+ajoutes: []
+modifies: []
+pi_apres: 11223344556677889900aabbaabbccdd
+
+### md_tronque_2o
+resultat: Err(Fichier .md V3 non reconnu (version 7, 2 octets). Rien n'a été écrit sur la boîte.)
+etat_identique: true
+avant: 7 entrees, apres: 7 entrees
+supprimes: []
+ajoutes: []
+modifies: []
+pi_apres: 11223344556677889900aabbaabbccdd
+
+### md_tronque_32o
+resultat: Err(Fichier .md V3 non reconnu (version 7, 32 octets). Rien n'a été écrit sur la boîte.)
+etat_identique: true
+avant: 7 entrees, apres: 7 entrees
+supprimes: []
+ajoutes: []
+modifies: []
+pi_apres: 11223344556677889900aabbaabbccdd
+
+### zip_tronque_md6
+resultat: Err(Lecture ZIP échouée : invalid Zip archive: Could not find EOCD)
+etat_identique: true
+avant: 7 entrees, apres: 7 entrees
+supprimes: []
+ajoutes: []
+modifies: []
+pi_apres: 11223344556677889900aabbaabbccdd
+
+### zip_corrompu_milieu_md7
+resultat: Err(Lecture ZIP échouée : invalid Zip archive: Could not find EOCD)
+etat_identique: true
+avant: 7 entrees, apres: 7 entrees
+supprimes: []
+ajoutes: []
+modifies: []
+pi_apres: 11223344556677889900aabbaabbccdd
+
+### zip_crc_donnees_md6
+resultat: Err(Lecture contenu ZIP 'assets/piste-longue-01.mp3' échouée : corrupt deflate stream)
+etat_identique: true
+avant: 7 entrees, apres: 7 entrees
+supprimes: []
+ajoutes: []
+modifies: []
+pi_apres: 11223344556677889900aabbaabbccdd
+
+### zip_crc_reimport_md7
+resultat: Err(Lecture contenu ZIP 'assets/piste-longue-01.mp3' échouée : corrupt deflate stream)
+etat_identique: true
+avant: 22 entrees, apres: 22 entrees
+supprimes: []
+ajoutes: []
+modifies: []
+pi_apres: 000000000000000000000000aabbccdd000000000000000000000000c3d2e1f0
+
+### zip_asset_manquant_md6
+resultat: Err(Fichier 'vignette-00.bmp' introuvable dans le ZIP)
+etat_identique: true
+avant: 7 entrees, apres: 7 entrees
+supprimes: []
+ajoutes: []
+modifies: []
+pi_apres: 11223344556677889900aabbaabbccdd
+
+### ni_echoue_apres_ecritures_md7
+resultat: Err(Format STUdio non supporté : x1)
+etat_identique: true
+avant: 7 entrees, apres: 7 entrees
+supprimes: []
+ajoutes: []
+modifies: []
+pi_apres: 11223344556677889900aabbaabbccdd
+
+### reimport_echoue_md6
+resultat: Err(Fichier 'vignette-00.bmp' introuvable dans le ZIP)
+etat_identique: false
+avant: 22 entrees, apres: 8 entrees
+supprimes: [".content/C3D2E1F0/", ".content/C3D2E1F0/.la-forge-a-histoires.json", ".content/C3D2E1F0/bt", ".content/C3D2E1F0/li", ".content/C3D2E1F0/ni", ".content/C3D2E1F0/nm", ".content/C3D2E1F0/rf/", ".content/C3D2E1F0/rf/000/", ".content/C3D2E1F0/rf/000/NETTE-00", ".content/C3D2E1F0/ri", ".content/C3D2E1F0/sf/", ".content/C3D2E1F0/sf/000/", ".content/C3D2E1F0/sf/000/ONGUE-01", ".content/C3D2E1F0/si"]
+ajoutes: []
+modifies: []
+pi_apres: 000000000000000000000000aabbccdd000000000000000000000000c3d2e1f0
+
+### import_ok_md7_temoin
+resultat: Ok(C3D2E1F0)
+etat_identique: false
+avant: 7 entrees, apres: 22 entrees
+supprimes: []
+ajoutes: [".content/C3D2E1F0/", ".content/C3D2E1F0/.la-forge-a-histoires.json", ".content/C3D2E1F0/bt", ".content/C3D2E1F0/li", ".content/C3D2E1F0/ni", ".content/C3D2E1F0/nm", ".content/C3D2E1F0/rf/", ".content/C3D2E1F0/rf/000/", ".content/C3D2E1F0/rf/000/NETTE-00", ".content/C3D2E1F0/ri", ".content/C3D2E1F0/sf/", ".content/C3D2E1F0/sf/000/", ".content/C3D2E1F0/sf/000/ONGUE-01", ".content/C3D2E1F0/si", ".pi.hidden"]
+modifies: [".pi"]
+pi_apres: 000000000000000000000000aabbccdd000000000000000000000000c3d2e1f0
+

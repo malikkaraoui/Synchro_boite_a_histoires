@@ -1,0 +1,198 @@
+//! SONDE TEMPORAIRE R002 — jamais committée. Rejoue les entrées du script de référence
+//! indépendant et écrit les sorties Rust à côté, pour comparaison octet à octet.
+use crate::storybox_crypto::cipher_story_data_v3;
+use crate::storybox_import::import_story;
+use crate::storybox_v3::parse_v3_md;
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
+
+const CASES: [&str; 4] = ["v6a", "v6b", "v7a", "v7b"];
+const SIZES: [usize; 7] = [5, 15, 16, 511, 512, 513, 4096];
+
+fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, (usize, String)>) {
+    use sha2::{Digest, Sha256};
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            walk(root, &path, out);
+        } else {
+            let data = fs::read(&path).unwrap();
+            let rel = path.strip_prefix(root).unwrap().to_string_lossy().to_string();
+            out.insert(rel, (data.len(), hex::encode(Sha256::digest(&data))));
+        }
+    }
+}
+
+#[test]
+fn r002_probe() {
+    let Ok(dir) = std::env::var("R002_DIR") else { return };
+    let dir = Path::new(&dir);
+    let inp = dir.join("in");
+    let mut report = serde_json::Map::new();
+    let mut keys = serde_json::Map::new();
+    let mut e2e = serde_json::Map::new();
+    for case in CASES {
+        let md = fs::read(inp.join(format!("{case}.md"))).unwrap();
+        let k = parse_v3_md(&md).unwrap();
+        keys.insert(case.into(), serde_json::json!({
+            "story_key": hex::encode(k.story_key),
+            "story_iv": hex::encode(k.story_iv),
+            "bt": hex::encode(k.bt),
+        }));
+        let out = dir.join("rs").join(case);
+        fs::create_dir_all(&out).unwrap();
+        for n in SIZES {
+            let data = fs::read(inp.join(format!("data_{n}.bin"))).unwrap();
+            fs::write(out.join(format!("enc_{n}.bin")), cipher_story_data_v3(&data, &k.story_key, &k.story_iv)).unwrap();
+        }
+        // Bout en bout : même .md, même ZIP, via import_story (aiguillage compris)
+        let mount = dir.join("mnt_rs").join(case);
+        if mount.exists() {
+            fs::remove_dir_all(&mount).unwrap();
+        }
+        fs::create_dir_all(mount.join(".content")).unwrap();
+        fs::write(mount.join(".md"), &md).unwrap();
+        import_story(mount.to_str().unwrap(), &inp.join("story.zip"), "r002", "sha256:r002", &|_| {}).unwrap();
+        let mut tree = BTreeMap::new();
+        walk(&mount.join(".content"), &mount.join(".content"), &mut tree);
+        let pi = fs::read(mount.join(".pi")).unwrap();
+        e2e.insert(case.into(), serde_json::json!({ "tree": tree, "pi": hex::encode(pi) }));
+    }
+    report.insert("keys".into(), keys.into());
+    report.insert("e2e".into(), e2e.into());
+    fs::write(dir.join("rs_report.json"), serde_json::to_string_pretty(&report).unwrap()).unwrap();
+}
+
+// ── Axe B : cas dégradés, état complet du montage avant/après ────────────────
+fn snapshot(root: &Path) -> BTreeMap<String, (usize, String)> {
+    let mut t = BTreeMap::new();
+    walk(root, root, &mut t);
+    // dossiers vides aussi
+    fn dirs(root: &Path, dir: &Path, out: &mut BTreeMap<String, (usize, String)>) {
+        for e in fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                out.insert(format!("{}/", p.strip_prefix(root).unwrap().to_string_lossy()), (0, "dir".into()));
+                dirs(root, &p, out);
+            }
+        }
+    }
+    dirs(root, root, &mut t);
+    t
+}
+
+fn write_zip(path: &Path, story_json: &str, assets: &[(&str, Vec<u8>)]) {
+    use std::io::Write;
+    let mut w = zip::ZipWriter::new(fs::File::create(path).unwrap());
+    let o = zip::write::SimpleFileOptions::default();
+    w.start_file("story.json", o).unwrap();
+    w.write_all(story_json.as_bytes()).unwrap();
+    for (n, d) in assets {
+        w.start_file(*n, o).unwrap();
+        w.write_all(d).unwrap();
+    }
+    w.finish().unwrap();
+}
+
+const SJ: &str = r#"{"format": "FMT", "version": 1, "title": "t", "description": "", "nightModeAvailable": true, "stageNodes": [{"uuid": "0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0", "squareOne": true, "audio": "piste-longue-01.mp3", "image": "vignette-00.bmp", "controlSettings": {"wheel": false, "ok": false, "home": true, "pause": true, "autoplay": true}, "okTransition": null, "homeTransition": null}], "actionNodes": [], "listNodes": []}"#;
+
+#[test]
+fn r002_degraded() {
+    let Ok(dir) = std::env::var("R002_DIR") else { return };
+    let base = Path::new(&dir).join("degraded");
+    if base.exists() { fs::remove_dir_all(&base).unwrap(); }
+    fs::create_dir_all(&base).unwrap();
+    let good_md6 = fs::read(Path::new(&dir).join("in/v6a.md")).unwrap();
+    let good_md7 = fs::read(Path::new(&dir).join("in/v7a.md")).unwrap();
+    let sj_ok = SJ.replace("FMT", "v1");
+    let sj_badfmt = SJ.replace("FMT", "x1"); // ni_data() échoue APRÈS écriture audio/image/ri/si/li
+    let audio: Vec<u8> = (0..3000u32).map(|i| (i * 7 + 1) as u8).collect();
+    let image: Vec<u8> = (0..900u32).map(|i| (i * 3 + 5) as u8).collect();
+    let good = base.join("good.zip");
+    write_zip(&good, &sj_ok, &[("assets/piste-longue-01.mp3", audio.clone()), ("assets/vignette-00.bmp", image.clone())]);
+    let missing_asset = base.join("missing_asset.zip");
+    write_zip(&missing_asset, &sj_ok, &[("assets/piste-longue-01.mp3", audio.clone())]);
+    let badfmt = base.join("badfmt.zip");
+    write_zip(&badfmt, &sj_badfmt, &[("assets/piste-longue-01.mp3", audio.clone()), ("assets/vignette-00.bmp", image.clone())]);
+    // ZIP tronqué au milieu (répertoire central perdu)
+    let gb = fs::read(&good).unwrap();
+    let truncated = base.join("truncated.zip");
+    fs::write(&truncated, &gb[..gb.len() / 2]).unwrap();
+    // ZIP corrompu au milieu (données de l'entrée audio altérées → CRC)
+    let mut cb = gb.clone();
+    let mid = cb.len() / 2;
+    for b in &mut cb[mid..mid + 64] { *b ^= 0x5A; }
+    let corrupt = base.join("corrupt_mid.zip");
+    fs::write(&corrupt, &cb).unwrap();
+    // ZIP dont seules les DONNÉES de l'entrée audio sont altérées (répertoire central intact → CRC)
+    let data_start = {
+        let mut a = zip::ZipArchive::new(fs::File::open(&good).unwrap()).unwrap();
+        let e = a.by_name("assets/piste-longue-01.mp3").unwrap();
+        e.data_start() as usize
+    };
+    let mut crc = gb.clone();
+    for b in &mut crc[data_start + 10..data_start + 20] { *b ^= 0xFF; }
+    let crc_zip = base.join("crc.zip");
+    fs::write(&crc_zip, &crc).unwrap();
+
+    let mut md6_size100 = good_md6.clone(); md6_size100.truncate(100);
+    let mut md6_512 = good_md6.clone(); md6_512.resize(512, 0);
+    let mut md7_129 = good_md7.clone(); md7_129.push(0);
+    let mut md6_badsnu = good_md6.clone(); md6_badsnu[0x1A + 3] = b'G';
+    let mut md7_badsnu = good_md7.clone(); md7_badsnu[0x1A] = b' ';
+    let mut md8 = good_md6.clone(); md8[0] = 8;
+    let mut md42 = good_md7.clone(); md42[0] = 42;
+    let mut md6_hi = good_md6.clone(); md6_hi[1] = 1; // u16 LE = 262
+    let md_trunc_1 = vec![6u8];
+    let md_trunc_2 = vec![7u8, 0];
+    let md_trunc_40 = good_md7[..0x20].to_vec();
+
+    let cases: Vec<(&str, Vec<u8>, &Path, bool)> = vec![
+        ("md6_taille100", md6_size100, &good, false),
+        ("md6_taille512", md6_512, &good, false),
+        ("md7_taille129", md7_129, &good, false),
+        ("md6_snu_non_hexa", md6_badsnu, &good, false),
+        ("md7_snu_espace", md7_badsnu, &good, false),
+        ("md_v8", md8, &good, false),
+        ("md_v42", md42, &good, false),
+        ("md6_octet1_non_nul_u16_262", md6_hi, &good, false),
+        ("md_vide", vec![], &good, false),
+        ("md_tronque_1o", md_trunc_1, &good, false),
+        ("md_tronque_2o", md_trunc_2, &good, false),
+        ("md_tronque_32o", md_trunc_40, &good, false),
+        ("zip_tronque_md6", good_md6.clone(), &truncated, false),
+        ("zip_corrompu_milieu_md7", good_md7.clone(), &corrupt, false),
+        ("zip_crc_donnees_md6", good_md6.clone(), &crc_zip, false),
+        ("zip_crc_reimport_md7", good_md7.clone(), &crc_zip, true),
+        ("zip_asset_manquant_md6", good_md6.clone(), &missing_asset, false),
+        ("ni_echoue_apres_ecritures_md7", good_md7.clone(), &badfmt, false),
+        ("reimport_echoue_md6", good_md6.clone(), &missing_asset, true),
+        ("import_ok_md7_temoin", good_md7.clone(), &good, false),
+    ];
+    let mut out = String::new();
+    for (name, md, zip, preimport) in cases {
+        let mount = base.join(format!("mnt_{name}"));
+        fs::create_dir_all(mount.join(".content/AABBCCDD/sf/000")).unwrap();
+        fs::write(mount.join(".content/AABBCCDD/ri"), b"officielle").unwrap();
+        // .pi officiel : UUID complet d'une histoire officielle présente
+        fs::write(mount.join(".pi"), hex::decode("11223344556677889900aabbaabbccdd").unwrap()).unwrap();
+        fs::write(mount.join(".md"), &md).unwrap();
+        if preimport {
+            import_story(mount.to_str().unwrap(), &good, "r002", "sha256:1", &|_| {}).unwrap();
+        }
+        let before = snapshot(&mount);
+        let res = import_story(mount.to_str().unwrap(), zip, "r002", "sha256:2", &|_| {});
+        let after = snapshot(&mount);
+        let removed: Vec<_> = before.keys().filter(|k| !after.contains_key(*k)).cloned().collect();
+        let added: Vec<_> = after.keys().filter(|k| !before.contains_key(*k)).cloned().collect();
+        let changed: Vec<_> = before.iter().filter(|(k, v)| after.get(*k).is_some_and(|a| a != *v)).map(|(k, _)| k.clone()).collect();
+        out.push_str(&format!(
+            "### {name}\nresultat: {}\netat_identique: {}\navant: {} entrees, apres: {} entrees\nsupprimes: {removed:?}\najoutes: {added:?}\nmodifies: {changed:?}\npi_apres: {}\n\n",
+            match &res { Ok(r) => format!("Ok({})", r.short_uuid), Err(e) => format!("Err({e})") },
+            before == after, before.len(), after.len(),
+            hex::encode(fs::read(mount.join(".pi")).unwrap_or_default()),
+        ));
+    }
+    fs::write(Path::new(&dir).join("degraded_report.txt"), out).unwrap();
+}
