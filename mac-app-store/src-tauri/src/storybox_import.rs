@@ -1,7 +1,7 @@
 //! Pipeline d'import natif Rust pour variante Mac App Store.
 //!
 //! Remplace boite-bridge.py pour les opérations compatibles V2 boîte à histoires.
-//! V3 (AES-128-CBC) retourne une erreur explicite : utiliser Synchro Boîte à histoires direct.
+//! V3 (`.md` v6/v7, AES-128-CBC) : `storybox_v3`. V2 et V3 s'installent par `install_story`.
 
 use crate::storybox_crypto;
 use crate::storybox_device;
@@ -226,51 +226,138 @@ pub fn import_story(
         );
     }
 
-    // ── 4. Créer le dossier story ────────────────────────────────────────────
-    let short_uuid = story.short_uuid();
+    // ── 4. Écriture en transit, puis remplacement ────────────────────────────
+    install_story(mount, &story.short_uuid(), story_id, hash, on_progress, |dir| {
+        write_story_files(&story, dir, &zip_entries, &device_key, on_progress)
+    })
+}
+
+// ── Installation non destructive (V2 et V3) ───────────────────────────────────
+//
+// L'histoire est écrite dans `.content/.<SHORT>.tmp/`. L'ancienne n'est remplacée qu'après
+// succès complet : `<SHORT>` → `.<SHORT>.old`, `.<SHORT>.tmp` → `<SHORT>`, index, puis
+// suppression de `.old`. Un échec avant le remplacement laisse la boîte et `.pi` intacts.
+// Les dossiers commençant par `.` sont ignorés par l'inventaire, le comptage et l'index.
+
+const STAGING_SUFFIX: &str = ".tmp";
+const PREVIOUS_SUFFIX: &str = ".old";
+
+fn staging_dir_name(short_uuid: &str, suffix: &str) -> String {
+    format!(".{short_uuid}{suffix}")
+}
+
+/// Nettoie les restes d'un import interrompu (crash, débranchement) :
+/// - `.<SHORT>.tmp` : histoire jamais installée → supprimée ;
+/// - `.<SHORT>.old` avec `<SHORT>` présent : remplacement abouti → supprimée ;
+/// - `.<SHORT>.old` sans `<SHORT>` : interruption entre les deux renommages → restaurée.
+///
+/// Seuls les noms de cette forme exacte (8 hex) sont touchés.
+pub(crate) fn clean_import_leftovers(content_dir: &Path) -> Result<(), String> {
+    let entries = fs::read_dir(content_dir)
+        .map_err(|e| format!("Lecture de .content/ échouée : {e}"))?;
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(rest) = name.strip_prefix('.') else { continue };
+        let (short_uuid, previous) = if let Some(s) = rest.strip_suffix(STAGING_SUFFIX) {
+            (s, false)
+        } else if let Some(s) = rest.strip_suffix(PREVIOUS_SUFFIX) {
+            (s, true)
+        } else {
+            continue;
+        };
+        if short_uuid.len() != 8 || !short_uuid.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+        let path = entry.path();
+        let live = content_dir.join(short_uuid);
+        if previous && !live.exists() {
+            fs::rename(&path, &live)
+                .map_err(|e| format!("Restauration de {short_uuid} échouée : {e}"))?;
+        } else {
+            fs::remove_dir_all(&path)
+                .map_err(|e| format!("Suppression de {name} échouée : {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Écrit une histoire via `write` dans un dossier de transit, puis l'installe à la place
+/// de `.content/<short_uuid>/`. En cas d'échec, l'histoire déjà présente reste intacte.
+pub(crate) fn install_story(
+    mount: &str,
+    short_uuid: &str,
+    story_id: &str,
+    hash: &str,
+    on_progress: &dyn Fn(&str),
+    write: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<ImportResult, String> {
     let content_dir = Path::new(mount).join(".content");
     if !content_dir.is_dir() {
         return Err("Dossier .content introuvable sur la boîte".to_string());
     }
+    clean_import_leftovers(&content_dir)
+        .map_err(|e| format!("Nettoyage d'un import interrompu échoué : {e}. Rien n'a été écrit."))?;
 
-    let story_dir = content_dir.join(&short_uuid);
+    let story_dir = content_dir.join(short_uuid);
+    let staging_dir = content_dir.join(staging_dir_name(short_uuid, STAGING_SUFFIX));
+    let previous_dir = content_dir.join(staging_dir_name(short_uuid, PREVIOUS_SUFFIX));
 
-    // Nettoyage si dossier existant (réimport)
-    if story_dir.exists() {
-        fs::remove_dir_all(&story_dir)
-            .map_err(|e| format!("Suppression dossier existant échouée : {e}"))?;
+    // ── Écriture complète en transit (fichiers + sidecar) ────────────────────
+    let staged = fs::create_dir_all(staging_dir.join("rf").join("000"))
+        .and_then(|_| fs::create_dir_all(staging_dir.join("sf").join("000")))
+        .map_err(|e| format!("Création du dossier de transit échouée : {e}"))
+        .and_then(|_| write(&staging_dir))
+        .and_then(|_| storybox_sync::write_sidecar_in(&staging_dir, story_id, hash));
+    if let Err(e) = staged {
+        return Err(with_cleanup(e, fs::remove_dir_all(&staging_dir), "dossier de transit"));
     }
 
-    fs::create_dir_all(story_dir.join("rf").join("000"))
-        .map_err(|e| format!("Création rf/000/ échouée : {e}"))?;
-    fs::create_dir_all(story_dir.join("sf").join("000"))
-        .map_err(|e| format!("Création sf/000/ échouée : {e}"))?;
-
-    // À partir d'ici : rollback en cas d'échec
-    let result = write_story_files(
-        &story,
-        &story_dir,
-        &zip_entries,
-        &device_key,
-        on_progress,
-    );
-
-    if let Err(ref e) = result {
-        let _ = fs::remove_dir_all(&story_dir);
-        return Err(e.clone());
+    // ── Remplacement : ancienne → .old, transit → définitif ─────────────────
+    let replacing = story_dir.exists();
+    if replacing {
+        if let Err(e) = fs::rename(&story_dir, &previous_dir) {
+            let e = format!("Mise de côté de l'ancienne histoire échouée : {e}");
+            return Err(with_cleanup(e, fs::remove_dir_all(&staging_dir), "dossier de transit"));
+        }
+    }
+    if let Err(e) = fs::rename(&staging_dir, &story_dir) {
+        let mut err = format!("Installation de l'histoire échouée : {e}");
+        if replacing {
+            err = with_cleanup(err, fs::rename(&previous_dir, &story_dir), "restauration de l'ancienne histoire");
+        }
+        return Err(with_cleanup(err, fs::remove_dir_all(&staging_dir), "dossier de transit"));
     }
 
-    // ── 5. Mise à jour de l'index de la boîte ───────────────────────────────
+    // ── Index : en cas d'échec, `.pi` et l'ancienne histoire sont restaurés ──
     on_progress("Mise à jour de l'index…");
-    if let Err(e) = storybox_device::repair_pack_index_native(mount) {
-        let _ = fs::remove_dir_all(&story_dir);
-        return Err(format!("Mise à jour index échouée : {e}"));
+    let pack_index = storybox_device::PackIndexSnapshot::take(Path::new(mount));
+    match storybox_device::repair_pack_index_native(mount) {
+        Ok(()) => {}
+        Err(e) => {
+            let mut err = format!("Mise à jour index échouée : {e}");
+            err = with_cleanup(err, pack_index.restore(), "restauration de .pi");
+            err = with_cleanup(err, fs::remove_dir_all(&story_dir), "retrait de la nouvelle histoire");
+            if replacing {
+                err = with_cleanup(err, fs::rename(&previous_dir, &story_dir), "restauration de l'ancienne histoire");
+            }
+            return Err(err);
+        }
     }
 
-    // ── 6. Écriture du sidecar Synchro Boîte à histoires ─────────────────────────────────────
-    storybox_sync::write_sidecar(mount, &short_uuid, story_id, hash)?;
+    // Un `.old` non supprimé ici est retiré au prochain import (clean_import_leftovers).
+    if replacing {
+        let _ = fs::remove_dir_all(&previous_dir);
+    }
 
-    Ok(ImportResult { short_uuid })
+    Ok(ImportResult { short_uuid: short_uuid.to_string() })
+}
+
+/// Ajoute à `err` l'échec éventuel d'une étape de retour arrière, au lieu de le taire.
+fn with_cleanup<E: std::fmt::Display>(err: String, cleanup: Result<(), E>, what: &str) -> String {
+    match cleanup {
+        Ok(()) => err,
+        Err(e) => format!("{err} ; {what} échoué(e) : {e}"),
+    }
 }
 
 /// Écrit tous les fichiers du story pack dans le dossier déjà créé.
@@ -554,6 +641,159 @@ mod tests {
         import(mount.path(), &zip_path).unwrap();
         assert!(!mount.path().join(".content/89ABCDEF/sf/000/RESIDU").exists());
         assert_pack_index(mount.path());
+    }
+
+    // ── Réimport non destructif (R002 ⛔) ────────────────────────────────────
+
+    /// Pack STUdio de la même histoire (même UUID), écrit hors montage.
+    /// `image: false` : l'image manque, l'échec survient après l'écriture de l'audio.
+    fn write_pack(dir: &Path, name: &str, audio: &[u8], image: bool) -> PathBuf {
+        use std::io::Write;
+        let zip_path = dir.join(name);
+        let mut writer = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        writer.start_file("story.json", opts).unwrap();
+        writer.write_all(STORY_JSON.as_bytes()).unwrap();
+        writer.start_file("assets/histoire.mp3", opts).unwrap();
+        writer.write_all(audio).unwrap();
+        if image {
+            writer.start_file("assets/image001.bmp", opts).unwrap();
+            writer.write_all(&pattern(700, 19, 29)).unwrap();
+        }
+        writer.finish().unwrap();
+        zip_path
+    }
+
+    /// Instantané complet du montage, comme R002 : dossiers et fichiers (taille, SHA-256).
+    fn snapshot(root: &Path) -> BTreeMap<String, (usize, String)> {
+        fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, (usize, String)>) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+                if path.is_dir() {
+                    out.insert(format!("{rel}/"), (0, "dir".to_string()));
+                    walk(root, &path, out);
+                } else {
+                    let data = fs::read(&path).unwrap();
+                    out.insert(rel, (data.len(), sha256_hex(&data)));
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(root, root, &mut out);
+        out
+    }
+
+    /// Montage avec l'histoire 89ABCDEF déjà importée et une histoire « officielle »
+    /// AABBCCDD indexée par son UUID complet (comme sur une boîte réelle).
+    fn mount_with_imported_story(md: &[u8]) -> (tempfile::TempDir, tempfile::TempDir) {
+        let (mount, packs, zip_path) = mount_with_pack(md);
+        let official = mount.path().join(".content/AABBCCDD");
+        for f in ["ni", "li", "ri", "si", "bt"] {
+            fs::create_dir_all(&official).unwrap();
+            fs::write(official.join(f), f.as_bytes()).unwrap();
+        }
+        import(mount.path(), &zip_path).unwrap();
+        (mount, packs)
+    }
+
+    fn hidden_content_entries(mount: &Path) -> Vec<String> {
+        fs::read_dir(mount.join(".content"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with('.'))
+            .collect()
+    }
+
+    #[test]
+    fn failed_reimport_leaves_box_identical_v2_and_v3() {
+        for md in [md_v5(), md_v6(), md_v7()] {
+            let (mount, packs) = mount_with_imported_story(&md);
+            let before = snapshot(mount.path());
+            assert!(before.contains_key(".content/89ABCDEF/sf/000/HISTOIRE"));
+
+            // Même histoire, image absente : l'audio est écrit en transit, puis l'import échoue.
+            let broken = write_pack(packs.path(), "broken.zip", &pattern(1000, 7, 3), false);
+            let err = import(mount.path(), &broken).unwrap_err();
+            assert!(err.contains("introuvable dans le ZIP"), "{err}");
+
+            assert_eq!(snapshot(mount.path()), before, "md v{} : la boîte doit rester identique", md[0]);
+        }
+    }
+
+    #[test]
+    fn index_failure_restores_previous_story_and_pack_index() {
+        for md in [md_v5(), md_v7()] {
+            let (mount, packs) = mount_with_imported_story(&md);
+            // `.pi.hidden` en dossier : l'écriture de l'index échoue APRÈS le remplacement.
+            fs::remove_file(mount.path().join(".pi.hidden")).unwrap();
+            fs::create_dir_all(mount.path().join(".pi.hidden")).unwrap();
+            // `.pi` à UUID complets : la réparation les réécrirait en UUID courts.
+            let full_uuids = hex::decode(
+                "123456789abc4def8123456789abcdef11223344556677889900aabbaabbccdd",
+            )
+            .unwrap();
+            fs::write(mount.path().join(".pi"), &full_uuids).unwrap();
+            let before = snapshot(mount.path());
+
+            let other = write_pack(packs.path(), "other.zip", &pattern(1000, 7, 3), true);
+            let err = import(mount.path(), &other).unwrap_err();
+            assert!(err.starts_with("Mise à jour index échouée"), "{err}");
+
+            assert_eq!(snapshot(mount.path()), before, "md v{} : ancienne histoire et .pi restaurés", md[0]);
+            assert_eq!(fs::read(mount.path().join(".pi")).unwrap(), full_uuids);
+        }
+    }
+
+    #[test]
+    fn successful_reimport_replaces_story() {
+        for md in [md_v5(), md_v6(), md_v7()] {
+            let (mount, packs) = mount_with_imported_story(&md);
+            let audio_path = mount.path().join(".content/89ABCDEF/sf/000/HISTOIRE");
+            let old_audio = fs::read(&audio_path).unwrap();
+
+            let new_audio = pattern(1000, 7, 3);
+            let updated = write_pack(packs.path(), "updated.zip", &new_audio, true);
+            assert_eq!(import(mount.path(), &updated).unwrap().short_uuid, "89ABCDEF");
+
+            let audio = fs::read(&audio_path).unwrap();
+            assert_ne!(audio, old_audio, "md v{} : l'histoire doit être remplacée", md[0]);
+            assert_eq!(&audio[512..], &new_audio[512..]);
+            assert!(hidden_content_entries(mount.path()).is_empty(), "ni .tmp ni .old ne restent");
+            assert!(mount.path().join(".content/89ABCDEF/.la-forge-a-histoires.json").is_file());
+            assert!(mount.path().join(".content/AABBCCDD/ni").is_file(), "autre histoire intacte");
+            let pi = fs::read(mount.path().join(".pi")).unwrap();
+            assert_eq!(pi.len(), 32, "deux histoires indexées, une seule fois chacune");
+        }
+    }
+
+    #[test]
+    fn interrupted_import_leftovers_are_cleaned() {
+        let (mount, _packs, zip_path) = mount_with_pack(&md_v7());
+        let content = mount.path().join(".content");
+        // Transit jamais installé
+        fs::create_dir_all(content.join(".AABBCCDD.tmp/sf/000")).unwrap();
+        fs::write(content.join(".AABBCCDD.tmp/ni"), b"partiel").unwrap();
+        // Remplacement abouti mais `.old` resté
+        fs::create_dir_all(content.join("11223344")).unwrap();
+        fs::write(content.join("11223344/ni"), b"nouvelle").unwrap();
+        fs::create_dir_all(content.join(".11223344.old")).unwrap();
+        fs::write(content.join(".11223344.old/ni"), b"ancienne").unwrap();
+        // Interruption entre les deux renommages : seule la copie `.old` existe
+        fs::create_dir_all(content.join(".55667788.old")).unwrap();
+        fs::write(content.join(".55667788.old/ni"), b"seule copie").unwrap();
+        // Dossier caché étranger : jamais touché
+        fs::create_dir_all(content.join(".Spotlight-V100")).unwrap();
+
+        import(mount.path(), &zip_path).unwrap();
+
+        assert!(!content.join(".AABBCCDD.tmp").exists());
+        assert!(!content.join(".11223344.old").exists());
+        assert_eq!(fs::read(content.join("11223344/ni")).unwrap(), b"nouvelle");
+        assert!(!content.join(".55667788.old").exists());
+        assert_eq!(fs::read(content.join("55667788/ni")).unwrap(), b"seule copie");
+        assert!(content.join(".Spotlight-V100").is_dir());
+        assert!(content.join("89ABCDEF/bt").is_file());
     }
 
     #[test]

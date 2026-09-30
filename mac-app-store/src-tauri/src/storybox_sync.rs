@@ -236,7 +236,11 @@ pub fn write_sidecar(
     story_id: &str,
     hash: &str,
 ) -> Result<(), String> {
-    let story_dir = Path::new(mount).join(".content").join(short_uuid);
+    write_sidecar_in(&Path::new(mount).join(".content").join(short_uuid), story_id, hash)
+}
+
+/// Écrit le sidecar dans un dossier story donné (y compris le dossier de transit d'un import).
+pub fn write_sidecar_in(story_dir: &Path, story_id: &str, hash: &str) -> Result<(), String> {
     if !story_dir.is_dir() {
         return Err(format!("Dossier story introuvable : {story_dir:?}"));
     }

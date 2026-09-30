@@ -13,9 +13,7 @@
 //! La lecture du `.md` et le refus éventuel ont lieu AVANT toute écriture sur la boîte.
 
 use crate::storybox_crypto;
-use crate::storybox_device;
-use crate::storybox_import::ImportResult;
-use crate::storybox_sync;
+use crate::storybox_import::{self, ImportResult};
 use crate::studio_story::StudioStory;
 use std::collections::BTreeMap;
 use std::fs;
@@ -201,42 +199,10 @@ pub fn import_story_v3(
         );
     }
 
-    // ── 4. Créer le dossier story ────────────────────────────────────────────
-    let short_uuid = story.short_uuid();
-    let content_dir = Path::new(mount).join(".content");
-    if !content_dir.is_dir() {
-        return Err("Dossier .content introuvable sur la boîte".to_string());
-    }
-
-    let story_dir = content_dir.join(&short_uuid);
-
-    if story_dir.exists() {
-        fs::remove_dir_all(&story_dir)
-            .map_err(|e| format!("Suppression dossier existant échouée : {e}"))?;
-    }
-
-    fs::create_dir_all(story_dir.join("rf").join("000"))
-        .map_err(|e| format!("Création rf/000/ échouée : {e}"))?;
-    fs::create_dir_all(story_dir.join("sf").join("000"))
-        .map_err(|e| format!("Création sf/000/ échouée : {e}"))?;
-
-    // À partir d'ici : rollback en cas d'échec
-    if let Err(e) = write_story_files_v3(&story, &story_dir, &zip_entries, &keys, on_progress) {
-        let _ = fs::remove_dir_all(&story_dir);
-        return Err(e);
-    }
-
-    // ── 5. Mise à jour de l'index de la boîte ───────────────────────────────
-    on_progress("Mise à jour de l'index…");
-    if let Err(e) = storybox_device::repair_pack_index_native(mount) {
-        let _ = fs::remove_dir_all(&story_dir);
-        return Err(format!("Mise à jour index échouée : {e}"));
-    }
-
-    // ── 6. Écriture du sidecar Synchro Boîte à histoires ─────────────────────
-    storybox_sync::write_sidecar(mount, &short_uuid, story_id, hash)?;
-
-    Ok(ImportResult { short_uuid })
+    // ── 4. Écriture en transit, puis remplacement (storybox_import::install_story) ──
+    storybox_import::install_story(mount, &story.short_uuid(), story_id, hash, on_progress, |dir| {
+        write_story_files_v3(&story, dir, &zip_entries, &keys, on_progress)
+    })
 }
 
 /// Écrit les fichiers d'une histoire V3 (référence : `import_studio_zip` en V3).

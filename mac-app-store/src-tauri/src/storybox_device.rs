@@ -273,11 +273,17 @@ fn is_short_uuid_dir_name(name: &str) -> bool {
     name.len() == 8 && name.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// Un dossier caché de `.content/` n'est jamais une histoire : transit d'un import en cours
+/// ou interrompu (`.<SHORT>.tmp`, `.<SHORT>.old`), ou dossier système.
+fn is_hidden_entry(entry: &fs::DirEntry) -> bool {
+    entry.file_name().to_string_lossy().starts_with('.')
+}
+
 fn collect_content_short_uuids(content_dir: &Path) -> Result<Vec<String>, String> {
     let mut short_uuids: Vec<String> = fs::read_dir(content_dir)
         .map_err(|e| format!("Lecture {:?} échouée : {e}", content_dir))?
         .filter_map(Result::ok)
-        .filter(|entry| entry.path().is_dir())
+        .filter(|entry| !is_hidden_entry(entry) && entry.path().is_dir())
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().to_uppercase();
             is_short_uuid_dir_name(&name).then_some(name)
@@ -352,6 +358,42 @@ fn write_all_pack_index_entries(
     write_pack_index_entries(&mount.join(".pi"), visible_entries)?;
     write_pack_index_entries(&mount.join(".pi.hidden"), hidden_entries)?;
     Ok(())
+}
+
+/// Copie brute de `.pi` et `.pi.hidden`, remise à l'identique si une mise à jour échoue.
+/// Un fichier illisible au moment de la copie n'est pas touché à la restauration.
+pub struct PackIndexSnapshot {
+    mount: PathBuf,
+    /// `None` : illisible ; `Some(None)` : absent ; `Some(Some(octets))` : contenu.
+    files: [(&'static str, Option<Option<Vec<u8>>>); 2],
+}
+
+impl PackIndexSnapshot {
+    pub fn take(mount: &Path) -> Self {
+        let read = |name: &str| match fs::read(mount.join(name)) {
+            Ok(data) => Some(Some(data)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(None),
+            Err(_) => None,
+        };
+        Self {
+            mount: mount.to_path_buf(),
+            files: [(".pi", read(".pi")), (".pi.hidden", read(".pi.hidden"))],
+        }
+    }
+
+    pub fn restore(&self) -> Result<(), String> {
+        for (name, saved) in &self.files {
+            let path = self.mount.join(name);
+            match saved {
+                Some(Some(data)) => fs::write(&path, data)
+                    .map_err(|e| format!("Restauration {name} échouée : {e}"))?,
+                Some(None) if path.exists() => fs::remove_file(&path)
+                    .map_err(|e| format!("Retrait {name} échoué : {e}"))?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
 }
 
 pub fn reorder_story_in_pack_index(
@@ -471,7 +513,7 @@ fn count_story_dirs(content_dir: &Path) -> usize {
     match fs::read_dir(content_dir) {
         Ok(entries) => entries
             .filter_map(Result::ok)
-            .filter(|e| e.path().is_dir())
+            .filter(|e| !is_hidden_entry(e) && e.path().is_dir())
             .count(),
         Err(_) => 0,
     }
@@ -801,7 +843,7 @@ pub fn read_inventory(mount: &Path) -> Option<StoryBoxInventory> {
     let mut dir_entries: Vec<_> = fs::read_dir(&content_dir)
         .ok()?
         .filter_map(Result::ok)
-        .filter(|e| e.path().is_dir())
+        .filter(|e| !is_hidden_entry(e) && e.path().is_dir())
         .collect();
     dir_entries.sort_by(|a, b| {
         let a_short = a.file_name().to_string_lossy().to_uppercase().to_string();
@@ -1253,6 +1295,29 @@ mod tests {
 
         let hidden_entries = super::read_pack_index_entries(&mount.join(".pi.hidden")).unwrap();
         assert!(hidden_entries.is_empty());
+    }
+
+    #[test]
+    fn hidden_import_dirs_are_ignored_by_inventory_count_and_index() {
+        let root = TempDir::new("storybox-hidden-dirs");
+        let mount = root.path().join("STORYBOX");
+        for dir in ["AABBCCDD", ".11223344.tmp", ".AABBCCDD.old"] {
+            let story = mount.join(".content").join(dir);
+            fs::create_dir_all(&story).unwrap();
+            for f in ["ni", "li", "ri", "si", "bt"] {
+                fs::write(story.join(f), b"x").unwrap();
+            }
+        }
+
+        let inv = read_inventory(&mount).unwrap();
+        let listed: Vec<_> = inv.stories.iter().map(|s| s.short_uuid.as_str()).collect();
+        assert_eq!(listed, vec!["AABBCCDD"]);
+        assert_eq!(super::count_story_dirs(&mount.join(".content")), 1);
+
+        repair_pack_index_native(&mount.to_string_lossy()).unwrap();
+        let pi = super::read_pack_index_entries(&mount.join(".pi")).unwrap();
+        let order: Vec<_> = pi.iter().map(super::short_uuid_from_uuid_bytes).collect();
+        assert_eq!(order, vec!["AABBCCDD"]);
     }
 
     #[test]
