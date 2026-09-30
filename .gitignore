@@ -60,3 +60,6 @@ vault/runtime/events.jsonl
 # Après un arrêt brutal, un verrou périmé committé bloquerait tout le monde.
 # vault/runtime/*.verrou
 # vault/runtime/*.tmp-*
+
+# Profil de provisioning et matériel de signature App Store : jamais suivis (R003, R3-4).
+mac-app-store/signing/
