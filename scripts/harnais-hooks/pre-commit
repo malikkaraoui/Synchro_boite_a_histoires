@@ -1,0 +1,31 @@
+#!/bin/sh
+# Git hook: pre-commit
+# Refuse un commit qui ferait grossir l'index de reprise au-delà de la limite.
+# Cet index est relu à CHAQUE démarrage de session : sans garde-fou, il atteint plusieurs
+# centaines de kilo-octets et se paye à chaque reprise. Le remède est imprimé dans l'erreur,
+# pour que la correction ne demande aucune recherche.
+#
+# Paramétrable par variable d'environnement (défauts entre accolades) :
+#   ROTATION_INDEX   chemin de l'index surveillé   {vault/reprise/00_INDEX.md}
+#   ROTATION_LIMITE  limite en octets              {80000}
+#   ROTATION_REMEDE  commande de rotation imprimée dans le message d'erreur
+
+INDEX="${ROTATION_INDEX:-vault/reprise/00_INDEX.md}"
+LIMITE="${ROTATION_LIMITE:-80000}"
+REMEDE="${ROTATION_REMEDE:-<commande de rotation de l’index du projet>}"
+
+# Ne rien faire si l'index ne fait pas partie de ce commit.
+git diff --cached --name-only --diff-filter=AM | grep -qx "$INDEX" || exit 0
+
+# Taille de la version INDEXÉE (pas celle du disque) : c'est elle qui sera committée.
+TAILLE=$(git cat-file -s ":$INDEX" 2>/dev/null) || exit 0
+
+if [ "$TAILLE" -gt "$LIMITE" ]; then
+  echo "BLOQUE : $INDEX fait $TAILLE octets (limite $LIMITE)." >&2
+  echo "  Remede : $REMEDE" >&2
+  echo "  Puis   : git add $INDEX vault/reprise/archive/index/" >&2
+  echo "  (Limite ajustable : ROTATION_LIMITE=<octets> git commit ...)" >&2
+  exit 1
+fi
+
+exit 0

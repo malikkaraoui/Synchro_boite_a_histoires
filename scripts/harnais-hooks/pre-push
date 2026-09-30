@@ -1,0 +1,204 @@
+#!/bin/sh
+# Git hook: pre-push
+# Garde de la branche principale (convention §9 : rien ne merge sans doublage independant).
+# Decision Malik 2026-09-24 00:15 (#27 recadree) : « simple a efficace / on essai ».
+# Durcissement O1-O4 (#41, doublage R020) ; decision Malik 2026-09-24 00:55 sur O3 : sur la
+# principale, seuls passent les merges avec rapport GO et les commits qui ne touchent que vault/ ;
+# « tout le reste est refuse, et il faut passer par une branche, un doublage et un merge ».
+#
+# Entree (githooks(5), pre-push) : sur stdin, une ligne par ref poussee :
+#   <local-ref> SP <local-object-name> SP <remote-ref> SP <remote-object-name> LF
+# Ref inexistante au distant : remote-object-name tout a zero. Suppression : local-ref "(delete)"
+# et local-object-name tout a zero.
+#
+# Regle, pour chaque ligne dont remote-ref est refs/heads/<git.branche_principale> (cle du bloc
+# "git" de ${HARNAIS_CONFIG:-config/harnais.json} ; config ou cle absente : main) :
+#   1. plage introduite : remote_sha..local_sha ; remote_sha nul (ou inconnu localement) :
+#      local_sha --not --remotes. Suppression (local_sha nul) : laisser passer.
+#   2. (O3) chaque commit NON-merge de la chaine --first-parent de la plage ne touche que des
+#      chemins sous vault/ (diff-tree --no-renames : un renommage depuis l'exterieur compte comme
+#      exterieur). Les commits amenes par le second parent d'un merge ne sont pas controles un par
+#      un : le rapport GO du merge les couvre.
+#   3. pour chaque merge de la plage (>= 2 parents), T = second parent : il faut, dans l'ARBRE de
+#      local_sha (jamais le working tree), un fichier vault/revues/*.md dont le frontmatter
+#      (O2 : "---" en 1re ligne, "---" fermant obligatoire) porte exactement une ligne "verdict:",
+#      egale a GO, et (O1) exactement une ligne "tip:", egale au SHA complet de T. Le corps du
+#      rapport ne compte pas. Rapport malforme : ignore (echec ferme).
+#      Exception (option B, decision Malik 2026-09-24 00:28 « go pour b ») : si T est DEJA PUBLIE --
+#      ancetre de remote_sha quand il est non nul, sinon atteignable depuis une ref refs/remotes/* --
+#      le merge est ignore : il n'introduit aucun travail non double (ex. merge de main DANS une
+#      branche, convention §8 « base perimee »).
+#   4. sinon : refus (exit 1), message sur stderr.
+# Erreur interne (git absent, config illisible, commande git en echec) : refus sur la principale
+# seulement ; un push de branche de travail n'est jamais bloque par un bug du hook.
+# Limite connue : "git push --no-verify" saute ce hook (les mandats l'interdisent deja).
+
+CONFIG="${HARNAIS_CONFIG:-config/harnais.json}"
+REVUES="vault/revues"
+PRINCIPALE=main
+ERREUR=""
+
+if ! command -v git >/dev/null 2>&1; then
+  ERREUR="git introuvable dans le PATH"
+fi
+
+# (O4) Valeur chaine de la cle "branche_principale" DIRECTEMENT dans l'objet "git" de premier
+# niveau du JSON sur stdin ; rien si absente. Mini-lecteur JSON (chaines, echappements, imbrication),
+# sans dependance ; les echappements de la valeur sont rendus tels quels (pas de decodage \uXXXX).
+lire_principale() {
+  LC_ALL=C awk '
+    { texte = texte $0 "\n" }
+    END {
+      n = length(texte); prof = 0; cle = ""
+      for (i = 1; i <= n; i++) {
+        c = substr(texte, i, 1)
+        if (c == "\"") {
+          ch = ""
+          for (i++; i <= n; i++) {
+            c = substr(texte, i, 1)
+            if (c == "\\") { ch = ch c substr(texte, i + 1, 1); i++; continue }
+            if (c == "\"") break
+            ch = ch c
+          }
+          j = i + 1
+          while (j <= n && substr(texte, j, 1) ~ /[ \t\r\n]/) j++
+          if (substr(texte, j, 1) == ":") { cle = ch; continue }
+          if (cle == "branche_principale" && prof == 2 && chemin[2] == "git") { print ch; exit }
+          cle = ""
+        } else if (c == "{" || c == "[") {
+          prof++; chemin[prof] = (c == "{") ? cle : "["; cle = ""
+        } else if (c == "}" || c == "]") {
+          prof--; cle = ""
+        } else if (c == ",") {
+          cle = ""
+        }
+      }
+    }'
+}
+
+if [ -f "$CONFIG" ]; then
+  if [ -r "$CONFIG" ]; then
+    VAL=$(lire_principale < "$CONFIG") || VAL=""
+    [ -n "$VAL" ] && PRINCIPALE="$VAL"
+  else
+    ERREUR="config $CONFIG illisible (branche principale supposee: $PRINCIPALE)"
+  fi
+fi
+
+est_nul() {
+  case "$1" in
+    *[!0]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# T ($1) deja publie ? remote_sha ($2) non nul : T ancetre de remote_sha ; nul : T atteignable
+# depuis refs/remotes/*. Toute erreur git compte comme "non publie" (regle stricte appliquee).
+deja_publie() {
+  if ! est_nul "$2"; then
+    git merge-base --is-ancestor "$1" "$2" 2>/dev/null
+  else
+    [ -n "$(git for-each-ref --contains "$1" --count=1 --format='x' refs/remotes/ 2>/dev/null)" ]
+  fi
+}
+
+# Tips couverts par les rapports GO de l'arbre $1 : un SHA par ligne sur stdout (valeur de la
+# ligne "tip:" de chaque rapport valide). Code != 0 si git echoue.
+tips_go() {
+  LISTE=$(git -c core.quotePath=false ls-tree --name-only "$1" "$REVUES/") || return 1
+  printf '%s\n' "$LISTE" | while IFS= read -r F; do
+    case "$F" in
+      *.md) ;;
+      *) continue ;;
+    esac
+    # Frontmatter : de la 1re ligne "---" a la ligne "---" suivante, qui doit exister (O2).
+    # Exactement une ligne "verdict:" (egale a GO, espaces toleres) et une ligne "tip:" (O1).
+    # Rapport malforme ou contradictoire : rien n'est imprime, le fichier ne couvre rien.
+    git cat-file blob "$1:$F" 2>/dev/null | awk '
+        NR == 1 { if ($0 != "---") exit; next }
+        $0 == "---" { ferme = 1; exit }
+        /^verdict[[:space:]]*:/ { nv++; if ($0 ~ /^verdict:[[:space:]]*GO[[:space:]]*$/) go = 1 }
+        /^tip[[:space:]]*:/ { nt++; tip = $0; sub(/^tip:[[:space:]]*/, "", tip); sub(/[[:space:]]*$/, "", tip) }
+        END { if (ferme && nv == 1 && go && nt == 1 && tip != "") print tip }'
+  done
+}
+
+# (O3) Premier chemin hors vault/ touche par le commit $1 (rien si tous sous vault/).
+# Code != 0 si git echoue.
+chemin_hors_vault() {
+  CHEMINS=$(git -c core.quotePath=false diff-tree --no-commit-id --name-only -r --no-renames --root "$1") || return 1
+  printf '%s\n' "$CHEMINS" | while IFS= read -r P; do
+    case "$P" in
+      ''|vault/?*) ;;
+      *) printf '%s\n' "$P"; break ;;
+    esac
+  done
+}
+
+REFUS=0
+
+while read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
+  [ "$REMOTE_REF" = "refs/heads/$PRINCIPALE" ] || continue
+  est_nul "$LOCAL_SHA" && continue
+
+  if [ -n "$ERREUR" ]; then
+    echo "pre-push: erreur interne du hook, push vers $REMOTE_REF refuse par prudence : $ERREUR" >&2
+    REFUS=1
+    continue
+  fi
+
+  if ! est_nul "$REMOTE_SHA" && git cat-file -e "$REMOTE_SHA^{commit}" 2>/dev/null; then
+    set -- "$REMOTE_SHA..$LOCAL_SHA"
+  else
+    set -- "$LOCAL_SHA" --not --remotes
+  fi
+  MERGES=$(git rev-list --merges "$@" 2>/dev/null) || MERGES="#erreur"
+  CHAINE=$(git rev-list --first-parent --no-merges "$@" 2>/dev/null) || CHAINE="#erreur"
+  if [ "$MERGES" = "#erreur" ] || [ "$CHAINE" = "#erreur" ]; then
+    echo "pre-push: erreur interne du hook (git rev-list en echec sur $LOCAL_SHA), push vers $REMOTE_REF refuse par prudence" >&2
+    REFUS=1
+    continue
+  fi
+
+  # (O3) Commits directs sur la principale : seulement des chemins vault/.
+  for C in $CHAINE; do
+    if ! P=$(chemin_hors_vault "$C"); then
+      echo "pre-push: erreur interne du hook (git diff-tree en echec sur $C), push vers $REMOTE_REF refuse par prudence" >&2
+      REFUS=1
+      continue
+    fi
+    if [ -n "$P" ]; then
+      echo "pre-push: REFUS -- commit $C vers $REMOTE_REF touche un chemin hors vault/ : $P" >&2
+      echo "  sur $PRINCIPALE, seuls passent les merges avec rapport de doublage GO et les commits qui ne touchent que vault/" >&2
+      echo "  a faire : branche, doublage, merge --no-ff (convention §9)" >&2
+      REFUS=1
+    fi
+  done
+
+  [ -n "$MERGES" ] || continue
+
+  if ! GO=$(tips_go "$LOCAL_SHA"); then
+    echo "pre-push: erreur interne du hook (git ls-tree en echec sur $LOCAL_SHA), push vers $REMOTE_REF refuse par prudence" >&2
+    REFUS=1
+    continue
+  fi
+
+  for M in $MERGES; do
+    T=$(git rev-parse --verify -q "$M^2") || T=""
+    if [ -z "$T" ]; then
+      echo "pre-push: erreur interne du hook (second parent de $M illisible), push refuse par prudence" >&2
+      REFUS=1
+      continue
+    fi
+    deja_publie "$T" "$REMOTE_SHA" && continue
+    if [ -z "$GO" ] || ! printf '%s\n' "$GO" | grep -qxF "$T"; then
+      echo "pre-push: REFUS -- merge $M vers $REMOTE_REF sans doublage GO." >&2
+      echo "  tip merge (second parent) : $T" >&2
+      echo "  manque : un fichier $REVUES/*.md, dans l'arbre pousse ($(printf '%.7s' "$LOCAL_SHA")), dont le frontmatter ferme porte exactement 'verdict: GO' et 'tip: $T'" >&2
+      echo "  a faire : committer le rapport de doublage GO dans le scratch, apres le merge --no-ff et avant le ff-only, puis repousser (convention §9)" >&2
+      REFUS=1
+    fi
+  done
+done
+
+exit "$REFUS"
