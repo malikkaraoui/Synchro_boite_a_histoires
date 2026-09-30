@@ -65,16 +65,24 @@ fn restore_device_access(
                 Ok(fresh) => {
                     settings.set_device_bookmark(&device_id, &fresh);
                     if let Err(e) = app_settings::save(app, &settings) {
-                        eprintln!("[sandbox] bookmark boîte régénéré mais non enregistré : {e}");
+                        sandbox_log(app, &format!("bookmark boîte régénéré mais non enregistré : {e}"));
                     }
                 }
-                Err(e) => eprintln!("[sandbox] bookmark boîte périmé non régénéré : {e}"),
+                Err(e) => sandbox_log(app, &format!("bookmark boîte périmé non régénéré : {e}")),
             }
         }
         access.set_device(mount.to_string(), probe.device_id.clone(), Some(resolved.access));
         return Some(probe);
     }
     None
+}
+
+/// Diagnostic sandbox : sur stderr (lancement depuis le Terminal) ET dans le journal de l'UI
+/// (évènement `sandbox:log`), pour qu'un bookmark non enregistré ne reste pas muet.
+fn sandbox_log(app: &tauri::AppHandle, message: &str) {
+    let line = format!("[sandbox] {message}");
+    eprintln!("{line}");
+    let _ = app.emit("sandbox:log", line);
 }
 
 #[derive(Serialize)]
@@ -106,7 +114,7 @@ fn grant_device_access(
     }
     let warning = remember_device(&app, &probe, mount).err();
     if let Some(w) = &warning {
-        eprintln!("[sandbox] {w}");
+        sandbox_log(&app, w);
     }
     access.set_device(path, probe.device_id.clone(), None);
     Ok(DeviceAccessGrant { remembered: warning.is_none(), warning, probe })
@@ -177,7 +185,7 @@ fn grant_audio_folder_access(
         warning = Some(format!("Réglages non enregistrés : {e}"));
     }
     if let Some(w) = &warning {
-        eprintln!("[sandbox] {w}");
+        sandbox_log(&app, w);
     }
     // L'accès au nouveau dossier vient du NSOpenPanel ; l'ancien accès est refermé.
     access.set_audio(None);
@@ -200,10 +208,10 @@ fn restore_audio_folder(
             Ok(fresh) => {
                 settings.set_audio_folder(&folder, Some(&fresh));
                 if let Err(e) = app_settings::save(&app, &settings) {
-                    eprintln!("[sandbox] bookmark dossier régénéré mais non enregistré : {e}");
+                    sandbox_log(&app, &format!("bookmark dossier régénéré mais non enregistré : {e}"));
                 }
             }
-            Err(e) => eprintln!("[sandbox] bookmark dossier périmé non régénéré : {e}"),
+            Err(e) => sandbox_log(&app, &format!("bookmark dossier périmé non régénéré : {e}")),
         }
     }
     access.set_audio(Some(resolved.access));

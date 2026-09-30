@@ -1292,6 +1292,12 @@ $repairBtn.addEventListener("click", async () => {
   const themeRadio = document.querySelector(`input[name="theme"][value="${savedTheme}"]`);
   if (themeRadio) themeRadio.checked = true;
 
+  // Diagnostics sandbox (bookmarks) : visibles dans le journal, pas seulement sur stderr.
+  await listen("sandbox:log", ({ payload }) => {
+    log("err", payload);
+    $logDrawer.classList.remove("hidden");
+  });
+
   // Le dossier audio n'est rouvert que par son bookmark (sous sandbox, le chemin seul est illisible).
   try {
     const folder = await invoke("restore_audio_folder");

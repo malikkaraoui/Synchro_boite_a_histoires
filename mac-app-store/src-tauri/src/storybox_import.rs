@@ -476,14 +476,14 @@ mod tests {
     }
 
     #[test]
-    fn import_rejects_v3_device() {
+    fn import_refuses_v3_md_with_unexpected_size() {
         use std::io::Write;
         let tmp = tempfile::tempdir().unwrap();
         let mount = tmp.path();
 
-        // Créer un .md V3 (md_version = 6)
+        // .md v6 de 512 octets : la référence n'accepte v6/v7 qu'en 112 ou 128 octets
         let mut md = vec![0u8; 512];
-        md[0] = 6; // md_version 6 → V3
+        md[0] = 6;
         fs::write(mount.join(".md"), &md).unwrap();
         fs::create_dir_all(mount.join(".content")).unwrap();
 
@@ -504,8 +504,9 @@ mod tests {
             "sha256:abc",
             &|_| {},
         );
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("V3"));
+        let err = result.unwrap_err();
+        assert!(err.contains("non reconnu (version 6, 512 octets)"), "{err}");
+        assert!(!mount.join(".pi").exists(), "rien n'est écrit sur la boîte");
     }
 
     // ── Bout en bout contre StoryBox.QT `import_studio_zip` ──────────────────
