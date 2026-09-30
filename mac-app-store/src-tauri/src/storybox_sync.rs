@@ -111,7 +111,7 @@ pub fn scan_audio_folder(folder_path: &str) -> Result<Vec<AudioFile>, String> {
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let p = entry.path();
-            if !p.is_file() {
+            if !p.is_file() || crate::storybox_device::is_macos_metadata(&entry.file_name().to_string_lossy()) {
                 return None;
             }
             let ext = p.extension()?.to_str()?.to_lowercase();
@@ -363,6 +363,19 @@ mod tests {
         let mut names: Vec<_> = files.iter().map(|f| f.filename.as_str()).collect();
         names.sort();
         assert_eq!(names, vec!["file0.mp3", "file1.MP3"]);
+    }
+
+    /// Sur une clé FAT/exFAT, macOS pose `._<nom>` à côté de chaque fichier : jamais importé.
+    #[test]
+    fn scan_ignores_appledouble_and_ds_store() {
+        let tmp = TempDir::new("storybox-sync-appledouble");
+        fs::write(tmp.path.join("story.mp3"), b"fake mp3").unwrap();
+        fs::write(tmp.path.join("._story.mp3"), b"\x00\x05\x16\x07").unwrap();
+        fs::write(tmp.path.join(".DS_Store"), b"x").unwrap();
+
+        let files = scan_audio_folder(&tmp.path.to_string_lossy()).unwrap();
+        let names: Vec<_> = files.iter().map(|f| f.filename.as_str()).collect();
+        assert_eq!(names, vec!["story.mp3"]);
     }
 
     #[test]

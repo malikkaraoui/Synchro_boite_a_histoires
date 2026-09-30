@@ -599,11 +599,19 @@ mod tests {
         (mount, packs, zip_path)
     }
 
+    /// `._*` et `.DS_Store` : posés par macOS sur FAT, jamais par l'import (R003).
+    fn is_macos_metadata(path: &Path) -> bool {
+        crate::storybox_device::is_macos_metadata(&path.file_name().unwrap().to_string_lossy())
+    }
+
     /// Tous les fichiers sous `root` : chemin relatif → (taille, SHA-256).
     fn tree(root: &Path) -> BTreeMap<String, (usize, String)> {
         fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, (usize, String)>) {
             for entry in fs::read_dir(dir).unwrap() {
                 let path = entry.unwrap().path();
+                if is_macos_metadata(&path) {
+                    continue;
+                }
                 if path.is_dir() {
                     walk(root, &path, out);
                 } else {
@@ -743,6 +751,9 @@ mod tests {
         fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, (usize, String)>) {
             for entry in fs::read_dir(dir).unwrap() {
                 let path = entry.unwrap().path();
+                if is_macos_metadata(&path) {
+                    continue;
+                }
                 let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
                 if path.is_dir() {
                     out.insert(format!("{rel}/"), (0, "dir".to_string()));
@@ -775,7 +786,7 @@ mod tests {
         fs::read_dir(mount.join(".content"))
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|n| n.starts_with('.'))
+            .filter(|n| n.starts_with('.') && !crate::storybox_device::is_macos_metadata(n))
             .collect()
     }
 

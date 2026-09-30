@@ -51,13 +51,28 @@ fn restore_device_access(
 ) -> Option<StoryBoxDeviceProbe> {
     let mut settings = app_settings::load(app);
     for (device_id, bookmark) in settings.device_bookmarks() {
-        // Une boîte débranchée ne se résout pas (aucun montage automatique).
-        let Ok(resolved) = sandbox_access::resolve(&bookmark) else { continue };
+        // Une boîte débranchée ne se résout pas (aucun montage automatique) : ces échecs sont
+        // attendus, d'où une seule ligne par bookmark et par motif pour la session.
+        let resolved = match sandbox_access::resolve(&bookmark) {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                sandbox_log_once(app, &format!("bookmark de la boîte {device_id} non résolu : {e}"));
+                continue;
+            }
+        };
         if resolved.path != Path::new(mount) {
+            sandbox_log_once(app, &format!(
+                "bookmark de la boîte {device_id} résolu vers {} et non {mount}",
+                resolved.path.display()
+            ));
             continue;
         }
         let probe = storybox_device::probe_mount(Path::new(mount));
         if !probe.connected || probe.device_id.as_deref() != Some(device_id.as_str()) {
+            sandbox_log_once(app, &format!(
+                "bookmark de la boîte {device_id} : la boîte montée sur {mount} n'est pas celle-ci ({:?})",
+                probe.device_id
+            ));
             continue;
         }
         if resolved.stale {
@@ -83,6 +98,24 @@ fn sandbox_log(app: &tauri::AppHandle, message: &str) {
     let line = format!("[sandbox] {message}");
     eprintln!("{line}");
     let _ = app.emit("sandbox:log", line);
+}
+
+/// `sandbox_log`, mais une seule fois par message pour la session : la détection repasse
+/// toutes les 3 s.
+fn sandbox_log_once(app: &tauri::AppHandle, message: &str) {
+    if first_occurrence(message) {
+        sandbox_log(app, message);
+    }
+}
+
+fn first_occurrence(message: &str) -> bool {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    SEEN.get_or_init(Default::default)
+        .lock()
+        .map(|mut seen| seen.insert(message.to_string()))
+        .unwrap_or(true)
 }
 
 #[derive(Serialize)]
@@ -526,4 +559,14 @@ fn main() {
                 app.state::<SandboxAccess>().release_all();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn first_occurrence_is_true_once_per_message() {
+        assert!(super::first_occurrence("test : bookmark A non résolu"));
+        assert!(!super::first_occurrence("test : bookmark A non résolu"));
+        assert!(super::first_occurrence("test : bookmark B non résolu"));
+    }
 }

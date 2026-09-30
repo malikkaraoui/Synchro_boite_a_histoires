@@ -235,10 +235,17 @@ pub fn get_volume_id(mount: &str) -> Option<String> {
     Some(format!("vol-{}", mount.replace('/', "_")))
 }
 
+/// Fichiers que macOS pose de lui-même : `._<nom>` (AppleDouble, sur FAT/exFAT, à côté de
+/// chaque fichier ou dossier écrit) et `.DS_Store`. Jamais une histoire, un audio ni une image.
+pub(crate) fn is_macos_metadata(name: &str) -> bool {
+    name.starts_with("._") || name == ".DS_Store"
+}
+
 fn dir_size_bytes(path: &Path) -> u64 {
     match fs::read_dir(path) {
         Ok(entries) => entries
             .filter_map(Result::ok)
+            .filter(|e| !is_macos_metadata(&e.file_name().to_string_lossy()))
             .map(|e| {
                 let p = e.path();
                 if p.is_dir() { dir_size_bytes(&p) }
@@ -803,6 +810,7 @@ fn find_cover_image(story_dir: &Path) -> Option<String> {
         if let Ok(entries) = fs::read_dir(dir) {
             let mut images: Vec<_> = entries
                 .filter_map(Result::ok)
+                .filter(|e| !is_macos_metadata(&e.file_name().to_string_lossy()))
                 .filter(|e| {
                     e.path().extension()
                         .and_then(|x| x.to_str())
@@ -822,6 +830,9 @@ fn find_cover_image(story_dir: &Path) -> Option<String> {
     if let Ok(entries) = fs::read_dir(story_dir) {
         for entry in entries.filter_map(Result::ok) {
             let p = entry.path();
+            if is_macos_metadata(&entry.file_name().to_string_lossy()) {
+                continue;
+            }
             if p.is_file() && p.extension().is_none() {
                 if detect_image_format(&p).is_some() {
                     return Some(p.to_string_lossy().into_owned());
@@ -1496,6 +1507,29 @@ mod tests {
         assert!(res.is_err(), "index illisible : la réparation doit échouer sans écrire ({res:?})");
         assert!(res.unwrap_err().contains("Index non modifié"));
         assert_eq!(index_order(&pi), vec!["11223344", "AABBCCDD"], "entrée incomplète non retirée");
+    }
+
+    /// R003 : sur FAT, macOS pose `._<nom>` à côté de chaque fichier et dossier écrit.
+    #[test]
+    fn inventory_ignores_macos_metadata_files() {
+        let root = TempDir::new("storybox-appledouble");
+        let mount = root.path().join("STORYBOX");
+        let story = mount.join(".content").join("AABBCCDD");
+        make_complete_story(&story);
+        fs::write(story.join("zz.png"), b"png").unwrap();
+        fs::write(story.join("._zz.png"), vec![0u8; 4096]).unwrap();
+        fs::write(story.join(".DS_Store"), vec![0u8; 100]).unwrap();
+        fs::write(mount.join(".content").join("._AABBCCDD"), vec![0u8; 4096]).unwrap();
+
+        let inv = read_inventory(&mount).unwrap();
+        let listed: Vec<_> = inv.stories.iter().map(|s| s.short_uuid.as_str()).collect();
+        assert_eq!(listed, vec!["AABBCCDD"]);
+        assert_eq!(inv.stories[0].size_bytes, 5 + 3, "5 fichiers d'1 octet + zz.png");
+        let cover = inv.stories[0].cover_path.clone().unwrap();
+        assert!(cover.ends_with("/zz.png"), "{cover}");
+        let report = repair_pack_index_native(&mount.to_string_lossy()).unwrap();
+        assert_eq!(report.indexed, 1);
+        assert!(report.incomplete.is_empty());
     }
 
     #[test]
