@@ -1,7 +1,8 @@
 # Rapport — Import natif Rust pour Mac App Store
 
 **Date** : 2026-05-25  
-**Statut** : Pipeline implémenté, 45/45 tests passent, validation sur device physique requise
+**Statut** : Pipeline implémenté, 45/45 tests passent, validation sur device physique requise  
+**Mise à jour 2026-09-30 (M0005)** : section « Boîtes V3 » réécrite (v6/v7 supportés, 64 tests). Le reste du document date du 2026-05-25 et n'a pas été revu.
 
 ---
 
@@ -120,14 +121,43 @@ cargo tauri build --features mac-app-store
 # vérifier que l'histoire apparaît et est lisible sur la boîte
 ```
 
-### 2. V3 non supporté
+### 2. Boîtes V3 : `.md` v6 et v7 supportés, v8+ refusé (M0005, 2026-09-30)
 
-Les boîte à histoires V3 (firmware récent, `.md[0]` ≥ 6) utilisent AES-128-CBC avec une `story_key` dérivée du fichier `.md` ou d'un fichier `.keys` externe. L'app retourne une erreur explicite et dirige vers Synchro Boîte à histoires direct.
+**Livré** dans `src/storybox_v3.rs` + `cipher_story_data_v3` (`src/storybox_crypto.rs`), branché dans `import_story` : V2 → chemin XXTEA inchangé ; V3 → chemin AES. **Aucune action du parent** : tout est dérivé du seul fichier `.md` de la boîte. Référence portée : StoryBox.QT `device_storybox.py` (`__feed_device`, `__md6to7_parse`, `load_md_fakestory_keys`, `import_studio_zip`) et `stories.py` (`aes_cipher`).
 
-**Implémentation V3 :**
-- Lire `story_key = reverse_bytes(md[0x40..0x50])` et `story_iv = reverse_bytes(md[0x50..0x60])` (md_version 7)
-- Chiffrement : AES-128-CBC (crate `aes` + `cbc`)
-- Ajouter `aes = "0.8"` + `cbc = "0.1"` + `block-padding = "0.3"` dans Cargo.toml
+**Aiguillage** (identique à la référence) : version = 2 premiers octets du `.md` (little-endian) ; v6/v7 acceptés seulement si le `.md` fait 112 ou 128 octets. SNU = 14 caractères hexadécimaux ASCII à `0x1A`, normalisés en minuscules (`hexlify(unhexlify(...))`). `reverse` = inversion des octets dans chaque mot de 4 octets (`reverse_bytes`).
+
+| `.md` | `story_key` | `story_iv` | `bt` (écrit tel quel, non chiffré) |
+|---|---|---|---|
+| v6 | reverse(hex(SNU) + `00 00`) | reverse(`00`×8 + hex(SNU)[:8]) | `md[0x40..0x60]` |
+| v7 | reverse(`md[0x40..0x50]`) | reverse(`md[0x50..0x60]`) | hex(SNU) + `00`×10 + hex(SNU)[:8] |
+| v8+ | — | — | **refus** : « Boîte V3 récente : clés non disponibles » |
+
+**Chiffrement** (`aes_cipher(buffer, key, iv, 0, 512)`) : AES-128-CBC, IV réinitialisé pour chaque fichier, sur les **512 premiers octets** ; le reste en clair. Fichier de moins de 512 octets et non multiple de 16 : complété par des `0x00` jusqu'au multiple de 16 suivant, puis chiffré en entier (le fichier grandit). Pas de padding PKCS. Fichiers chiffrés : `sf/000/*`, `rf/000/*`, `ri`, `si`, `li`. En clair : `ni`, `nm`, `bt`. Arborescence et noms identiques au V2 (`.content/<SHORT_UUID>/`), puis `.pi` et sidecar comme en V2.
+
+**Limites v8+** : la référence n'importe sur un `.md` v8+ qu'avec une sauvegarde `.md` v6/v7 antérieure de la même boîte ou un fichier de clés réelles `<SNU>.keys` fourni de l'extérieur. Cette variante ne gère ni l'un ni l'autre : erreur explicite, levée **avant toute écriture** sur la boîte (testé : arborescence identique avant/après, pas de `.pi` créé). Un `.md` v6/v7 de taille inattendue ou au SNU illisible est refusé de la même façon, avec un message distinct.
+
+**Preuves** : vecteurs produits par le code de référence Python sur des `.md` synthétiques v5/v6/v7/v8 (script hors dépôt, rapport M0005), figés dans 18 tests Rust : dérivation des clés, `aes_cipher`, import de bout en bout octet par octet (SHA-256 de chaque fichier), refus v8, V2 inchangé. Crates : `aes` 0.8.4 + `cbc` 0.1.2 (RustCrypto, MIT OR Apache-2.0), compilées dans l'app.
+
+**Écarts connus, antérieurs à M0005 et communs V2/V3** (non modifiés) : `.pi` ne contient que le short UUID (12 octets nuls + 4 octets) alors que la référence écrit l'UUID complet ; en V2, `bt` fait 64 octets alors que la référence écrit `len(ri)` octets (12 pour une image). L'app ne transcode pas l'audio : la référence convertit en MP3 mono 44,1 kHz et retire les tags ID3.
+
+#### Protocole de test physique V3 (boîte attendue la semaine du 2026-10-05)
+
+1. Brancher la boîte, repérer son volume : `ls /Volumes`. Dans la suite, `B="/Volumes/<NOM>"`.
+2. Lire la version **avant tout import** : `xxd -l 1 "$B/.md"` → `06` ou `07` : supporté ; `08` ou plus : l'app refusera sans rien écrire (le signaler, fin du test). Taille : `stat -f %z "$B/.md"` → attendu `112` ou `128`. Firmware : `xxd -s 2 -l 5 "$B/.md"`.
+3. Sauvegarder : `mkdir -p ~/boite-v3-test && cp "$B/.md" "$B/.pi" ~/boite-v3-test/ && ls "$B/.content" > ~/boite-v3-test/content-avant.txt`.
+4. Préparer un MP3 court, mono, 44,1 kHz, sans tags (l'app ne convertit pas). Avec ffmpeg, si installé : `ffmpeg -i source.mp3 -ac 1 -ar 44100 -map_metadata -1 -id3v2_version 0 test-v3.mp3`.
+5. Importer `test-v3.mp3` depuis l'app App Store construite depuis la branche. Noter le message affiché.
+6. Éjecter proprement (`diskutil eject "$B"`), débrancher, redémarrer la boîte, chercher l'histoire, écouter jusqu'au bout.
+7. **Succès** : l'histoire apparaît et se lit normalement. Refaire une fois avec un second MP3 pour confirmer.
+
+**Si ça échoue, remonter** (ne pas publier ces sorties : le `.md` contient le numéro de série et, en v7, la clé d'histoire) :
+- le message de l'app, et le symptôme sur la boîte : histoire absente du menu / présente mais muette / bruit / boîte bloquée ;
+- `xxd -l 1 "$B/.md"`, `stat -f %z "$B/.md"`, `xxd -s 2 -l 5 "$B/.md"` ;
+- `ls "$B/.content"` puis, pour le dossier créé (`S=<SHORT_UUID>`) : `ls -laR "$B/.content/$S"`, `xxd "$B/.content/$S/bt"`, `xxd -l 64 "$B/.content/$S/ri"`, `xxd "$B/.pi"` ;
+- pour comparer, une histoire officielle déjà présente et lisible (`O=<autre dossier>`) : `xxd "$B/.content/$O/bt"` et `ls -la "$B/.content/$O"`. En v6, noter si ce `bt` est égal à `xxd -s 0x40 -l 32 "$B/.md"`.
+
+**Retour arrière** : supprimer l'histoire depuis l'app, ou `rm -r "$B/.content/$S"` puis `cp ~/boite-v3-test/.pi "$B/.pi"`.
 
 ### 3. Validation sandbox USB
 
