@@ -392,7 +392,7 @@ pub(crate) fn install_story(
         Ok(report) => {
             if !report.incomplete.is_empty() {
                 on_progress(&format!(
-                    "⚠ Dossier(s) incomplet(s) non indexé(s), laissé(s) sur la boîte : {}",
+                    "⚠ Dossier(s) incomplet(s), laissé(s) sur la boîte (gardé(s) dans l'index s'il(s) y étai(en)t, jamais ajouté(s)) : {}",
                     report.incomplete.join(", ")
                 ));
             }
@@ -1025,6 +1025,29 @@ mod tests {
         assert!(report.incomplete.is_empty(), "{:?}", report.incomplete);
         assert_eq!(report.leftovers.len(), 1, "{:?}", report.leftovers);
         assert!(report.leftovers[0].starts_with("89ABCDEF"), "{:?}", report.leftovers);
+    }
+
+    /// R003 test C : une histoire officielle déjà indexée (UUID complet) à laquelle il manque
+    /// `bt` ou même `ni` reste dans `.pi` après l'import d'une autre histoire ; elle est signalée.
+    #[test]
+    fn indexed_official_story_missing_a_file_stays_indexed() {
+        for missing in ["bt", "ni"] {
+            let (mount, _packs, zip_path) = mount_with_pack(&md_v5());
+            let official = mount.path().join(".content/AABBCCDD");
+            fs::create_dir_all(official.join("sf/000")).unwrap();
+            for f in ["ni", "li", "ri", "si", "bt"].into_iter().filter(|f| *f != missing) {
+                fs::write(official.join(f), f.as_bytes()).unwrap();
+            }
+            let full = hex::decode("11223344556677889900aabbaabbccdd").unwrap();
+            fs::write(mount.path().join(".pi"), &full).unwrap();
+
+            let (res, log) = import_logged(mount.path(), &zip_path);
+            res.unwrap();
+            assert_eq!(pi_short_uuids(mount.path()), vec!["AABBCCDD", "89ABCDEF"], "[{missing} manquant]");
+            let signalled = log.iter().any(|l| l.contains("incomplet") && l.contains("AABBCCDD"));
+            assert_eq!(signalled, missing == "ni", "[{missing} manquant] {log:?}");
+            assert!(official.is_dir());
+        }
     }
 
     #[test]

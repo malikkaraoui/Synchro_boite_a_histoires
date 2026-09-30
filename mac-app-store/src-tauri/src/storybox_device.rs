@@ -3,7 +3,7 @@
 //! + ajout du fallback détection par nom de volume.
 
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -282,30 +282,18 @@ fn is_hidden_entry(entry: &fs::DirEntry) -> bool {
     entry.file_name().to_string_lossy().starts_with('.')
 }
 
-fn collect_content_short_uuids(content_dir: &Path) -> Result<Vec<String>, String> {
-    let mut short_uuids: Vec<String> = fs::read_dir(content_dir)
-        .map_err(|e| format!("Lecture {:?} échouée : {e}", content_dir))?
+/// Dossiers d'histoires de `root` (`.content/` ou `.content.hidden/`) : UUID court en
+/// majuscules → chemin réel. Les entrées cachées (transit, AppleDouble `._*`) sont ignorées.
+fn collect_story_dirs(root: &Path) -> Result<BTreeMap<String, PathBuf>, String> {
+    Ok(fs::read_dir(root)
+        .map_err(|e| format!("Lecture {:?} échouée : {e}", root))?
         .filter_map(Result::ok)
         .filter(|entry| !is_hidden_entry(entry) && entry.path().is_dir())
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().to_uppercase();
-            is_short_uuid_dir_name(&name).then_some(name)
+            is_short_uuid_dir_name(&name).then(|| (name, entry.path()))
         })
-        .collect();
-
-    short_uuids.sort();
-    Ok(short_uuids)
-}
-
-fn filter_known_short_uuids(entries: &[[u8; 16]], known_short_uuids: &HashSet<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-
-    entries
-        .iter()
-        .map(short_uuid_from_uuid_bytes)
-        .filter(|short_uuid| known_short_uuids.contains(short_uuid))
-        .filter(|short_uuid| seen.insert(short_uuid.clone()))
-        .collect()
+        .collect())
 }
 
 fn read_pack_index_entries(index_path: &Path) -> Result<Vec<[u8; 16]>, String> {
@@ -431,12 +419,30 @@ pub fn reorder_story_in_pack_index(
     write_all_pack_index_entries(mount_path, &visible_entries, &hidden_entries)
 }
 
-/// Fichiers sans lesquels une histoire est illisible : un dossier qui en manque un n'est
-/// jamais indexé (import interrompu, copie partielle).
-const REQUIRED_STORY_FILES: [&str; 5] = ["ni", "li", "ri", "si", "bt"];
+/// Fichiers qu'exige la référence pour rattacher un dossier à l'index (`__valid_story`).
+const REFERENCE_STORY_FILES: [&str; 4] = ["ni", "li", "ri", "si"];
+const SIDECAR_FILE: &str = ".la-forge-a-histoires.json";
 
+/// Histoire complète : `ni`, `li`, `ri`, `si` (critère de la référence, qui régénère `bt` en V2
+/// et s'en passe en V3), plus `bt` si le dossier porte le sidecar, c'est-à-dire s'il a été écrit
+/// par l'app, qui écrit toujours `bt`.
 pub(crate) fn is_complete_story_dir(story_dir: &Path) -> bool {
-    REQUIRED_STORY_FILES.iter().all(|f| story_dir.join(f).is_file())
+    REFERENCE_STORY_FILES.iter().all(|f| story_dir.join(f).is_file())
+        && (!story_dir.join(SIDECAR_FILE).exists() || story_dir.join("bt").is_file())
+}
+
+/// Entrées d'un index pour la réparation : absent ou de taille invalide → vide (reconstruit
+/// depuis les dossiers) ; illisible → erreur, pour ne rien retirer sur une lecture ratée.
+fn read_pack_index_for_repair(index_path: &Path) -> Result<Vec<[u8; 16]>, String> {
+    let data = match fs::read(index_path) {
+        Ok(data) => data,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("Lecture {:?} échouée : {e}. Index non modifié.", index_path)),
+    };
+    if data.len() % 16 != 0 {
+        return Ok(Vec::new());
+    }
+    read_pack_index_entries(index_path)
 }
 
 /// Résultat de la réparation de `.pi`.
@@ -445,14 +451,20 @@ pub(crate) fn is_complete_story_dir(story_dir: &Path) -> bool {
 pub struct PackIndexRepair {
     /// Histoires indexées (`.pi` et `.pi.hidden`).
     pub indexed: usize,
-    /// Dossiers `.content/<SHORT>` incomplets : non indexés, jamais supprimés automatiquement.
+    /// Dossiers incomplets : gardés dans l'index s'ils y étaient, jamais ajoutés, jamais
+    /// supprimés automatiquement.
     pub incomplete: Vec<String>,
     /// Restes d'un import interrompu traités ou laissés avant la réparation (signalements).
     pub leftovers: Vec<String>,
 }
 
-/// Reconstruit `.pi` depuis les dossiers **complets** de `.content/`, en gardant l'ordre
-/// existant et `.pi.hidden`. Format des entrées inchangé (UUID court, cf. NATIVE_IMPORT.md).
+/// Répare `.pi` et `.pi.hidden` avec le critère de la référence (`recover_stories`) :
+/// - une entrée dont le dossier existe (`.content/` ou `.content.hidden/`) est **gardée**, à sa
+///   place, même si le dossier est incomplet ;
+/// - une entrée dont le dossier n'existe plus est retirée ;
+/// - un dossier absent des deux index n'est ajouté que s'il est complet (`is_complete_story_dir`),
+///   à `.pi` depuis `.content/`, à `.pi.hidden` depuis `.content.hidden/`.
+/// Format des entrées inchangé (UUID court, cf. NATIVE_IMPORT.md).
 pub fn repair_pack_index_native(mount: &str) -> Result<PackIndexRepair, String> {
     let mount_path = Path::new(mount);
     if !mount_path.is_dir() {
@@ -463,32 +475,48 @@ pub fn repair_pack_index_native(mount: &str) -> Result<PackIndexRepair, String> 
     if !content_dir.is_dir() {
         return Err("Dossier .content introuvable sur la boîte".to_string());
     }
+    let visible_dirs = collect_story_dirs(&content_dir)?;
+    let hidden_content_dir = mount_path.join(".content.hidden");
+    let hidden_dirs = if hidden_content_dir.exists() {
+        collect_story_dirs(&hidden_content_dir)?
+    } else {
+        BTreeMap::new()
+    };
+    let exists = |short_uuid: &String| visible_dirs.contains_key(short_uuid) || hidden_dirs.contains_key(short_uuid);
 
-    let (content_short_uuids, incomplete): (Vec<String>, Vec<String>) =
-        collect_content_short_uuids(&content_dir)?
-            .into_iter()
-            .partition(|short_uuid| is_complete_story_dir(&content_dir.join(short_uuid)));
-    let known_short_uuids: HashSet<String> = content_short_uuids.iter().cloned().collect();
+    let visible_entries = read_pack_index_for_repair(&mount_path.join(".pi"))?;
+    let hidden_entries = read_pack_index_for_repair(&mount_path.join(".pi.hidden"))?;
 
-    let visible_entries = read_pack_index_entries(&mount_path.join(".pi")).unwrap_or_default();
-    let hidden_entries = read_pack_index_entries(&mount_path.join(".pi.hidden")).unwrap_or_default();
+    // Entrées gardées, dans leur ordre ; une entrée à la fois dans les deux index reste cachée.
+    let mut indexed: HashSet<String> = HashSet::new();
+    let mut keep = |entries: &[[u8; 16]]| -> Vec<String> {
+        entries
+            .iter()
+            .map(short_uuid_from_uuid_bytes)
+            .filter(|short_uuid| exists(short_uuid) && indexed.insert(short_uuid.clone()))
+            .collect()
+    };
+    let mut hidden_short_uuids = keep(&hidden_entries);
+    let mut visible_short_uuids = keep(&visible_entries);
 
-    let hidden_short_uuids = filter_known_short_uuids(&hidden_entries, &known_short_uuids);
-    let hidden_short_set: HashSet<String> = hidden_short_uuids.iter().cloned().collect();
-
-    let mut visible_short_uuids = filter_known_short_uuids(&visible_entries, &known_short_uuids)
-        .into_iter()
-        .filter(|short_uuid| !hidden_short_set.contains(short_uuid))
-        .collect::<Vec<_>>();
-
-    let mut present_short_uuids: HashSet<String> = visible_short_uuids.iter().cloned().collect();
-    present_short_uuids.extend(hidden_short_uuids.iter().cloned());
-
-    for short_uuid in content_short_uuids {
-        if present_short_uuids.insert(short_uuid.clone()) {
-            visible_short_uuids.push(short_uuid);
+    // Ajouts : seulement des dossiers complets, absents des deux index.
+    for (dirs, out) in [(&visible_dirs, &mut visible_short_uuids), (&hidden_dirs, &mut hidden_short_uuids)] {
+        for (short_uuid, path) in dirs {
+            if !indexed.contains(short_uuid) && is_complete_story_dir(path) {
+                indexed.insert(short_uuid.clone());
+                out.push(short_uuid.clone());
+            }
         }
     }
+
+    let mut incomplete: Vec<String> = visible_dirs
+        .iter()
+        .chain(hidden_dirs.iter())
+        .filter(|(_, path)| !is_complete_story_dir(path))
+        .map(|(short_uuid, _)| short_uuid.clone())
+        .collect();
+    incomplete.sort();
+    incomplete.dedup();
 
     let visible_uuid_entries = visible_short_uuids
         .iter()
@@ -1357,35 +1385,117 @@ mod tests {
         assert_eq!(order, vec!["AABBCCDD"]);
     }
 
+    fn index_order(path: &Path) -> Vec<String> {
+        super::read_pack_index_entries(path)
+            .unwrap()
+            .iter()
+            .map(super::short_uuid_from_uuid_bytes)
+            .collect()
+    }
+
+    fn short_entry(short_uuid: &str) -> [u8; 16] {
+        super::short_uuid_to_uuid_bytes(short_uuid).unwrap()
+    }
+
     #[test]
-    fn repair_pack_index_skips_and_reports_incomplete_story_dirs() {
+    fn repair_pack_index_never_adds_incomplete_story_dirs() {
         let root = TempDir::new("storybox-repair-incomplete");
         let mount = root.path().join("STORYBOX");
         let content = mount.join(".content");
         make_complete_story(&content.join("AABBCCDD"));
-        // Import interrompu : `bt` manquant ; dossier vide ; complet mais sans `si`.
+        // Écrit par l'app (sidecar) sans `bt` : import interrompu, non ajouté.
         make_complete_story(&content.join("11223344"));
+        fs::write(content.join("11223344").join(super::SIDECAR_FILE), b"{}").unwrap();
         fs::remove_file(content.join("11223344").join("bt")).unwrap();
+        // Vide ; sans sidecar mais sans `si` : non ajoutés.
         fs::create_dir_all(content.join("55667788")).unwrap();
         make_complete_story(&content.join("99AABBCC"));
         fs::remove_file(content.join("99AABBCC").join("si")).unwrap();
-        // Un dossier incomplet déjà présent dans `.pi` en sort aussi.
-        let mut stale = [0u8; 16];
-        stale[12..].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
-        write_pack_index_entries(&mount.join(".pi"), &[stale]).unwrap();
+        // Sans sidecar ni `bt` : complet pour la référence (qui régénère `bt`), ajouté.
+        make_complete_story(&content.join("CAFE0001"));
+        fs::remove_file(content.join("CAFE0001").join("bt")).unwrap();
 
         let report = repair_pack_index_native(&mount.to_string_lossy()).unwrap();
-        assert_eq!(report.indexed, 1);
+        assert_eq!(report.indexed, 2);
         assert_eq!(report.incomplete, vec!["11223344", "55667788", "99AABBCC"]);
-
-        let pi = super::read_pack_index_entries(&mount.join(".pi")).unwrap();
-        let order: Vec<_> = pi.iter().map(super::short_uuid_from_uuid_bytes).collect();
-        assert_eq!(order, vec!["AABBCCDD"], "seul le dossier complet est indexé");
+        assert_eq!(index_order(&mount.join(".pi")), vec!["AABBCCDD", "CAFE0001"]);
         // Jamais supprimés automatiquement
         for dir in ["11223344", "55667788", "99AABBCC"] {
             assert!(content.join(dir).is_dir(), "{dir} doit rester sur la boîte");
         }
         assert!(content.join("11223344").join("ni").is_file());
+    }
+
+    /// R003 R3-2 : une entrée n'est retirée que si son dossier n'existe plus ; incomplète, elle
+    /// est gardée à sa place et seulement signalée (référence : « Already in list but invalid »).
+    #[test]
+    fn repair_pack_index_keeps_indexed_story_dirs_even_incomplete() {
+        let root = TempDir::new("storybox-repair-keep");
+        let mount = root.path().join("STORYBOX");
+        let content = mount.join(".content");
+        make_complete_story(&content.join("AABBCCDD"));
+        make_complete_story(&content.join("11223344"));
+        fs::remove_file(content.join("11223344").join("ni")).unwrap();
+        make_complete_story(&content.join("55667788"));
+        fs::write(content.join("55667788").join(super::SIDECAR_FILE), b"{}").unwrap();
+        fs::remove_file(content.join("55667788").join("bt")).unwrap();
+        fs::create_dir_all(content.join("99AABBCC")).unwrap();
+        let entries = ["11223344", "00000001", "55667788", "AABBCCDD", "99AABBCC"].map(short_entry);
+        write_pack_index_entries(&mount.join(".pi"), &entries).unwrap();
+
+        let report = repair_pack_index_native(&mount.to_string_lossy()).unwrap();
+        assert_eq!(
+            index_order(&mount.join(".pi")),
+            vec!["11223344", "55667788", "AABBCCDD", "99AABBCC"],
+            "seule l'entrée sans dossier (00000001) sort, l'ordre est gardé"
+        );
+        assert_eq!(report.incomplete, vec!["11223344", "55667788", "99AABBCC"]);
+        assert_eq!(report.indexed, 4);
+    }
+
+    /// Relevé R003 : la référence range les histoires cachées dans `.content.hidden/`
+    /// (`HIDDEN_STORIES_BASEDIR`). Leur entrée de `.pi.hidden` n'en sort jamais.
+    #[test]
+    fn repair_pack_index_keeps_hidden_stories_of_content_hidden() {
+        let root = TempDir::new("storybox-repair-content-hidden");
+        let mount = root.path().join("STORYBOX");
+        make_complete_story(&mount.join(".content").join("AABBCCDD"));
+        let hidden_content = mount.join(".content.hidden");
+        make_complete_story(&hidden_content.join("11223344"));
+        make_complete_story(&hidden_content.join("55667788"));
+        fs::remove_file(hidden_content.join("55667788").join("li")).unwrap();
+        // Caché par la référence mais absent de `.pi.hidden` : rattaché s'il est complet.
+        make_complete_story(&hidden_content.join("99AABBCC"));
+        write_pack_index_entries(&mount.join(".pi"), &[short_entry("AABBCCDD")]).unwrap();
+        write_pack_index_entries(&mount.join(".pi.hidden"), &["55667788", "11223344"].map(short_entry)).unwrap();
+
+        let report = repair_pack_index_native(&mount.to_string_lossy()).unwrap();
+        assert_eq!(index_order(&mount.join(".pi")), vec!["AABBCCDD"]);
+        assert_eq!(index_order(&mount.join(".pi.hidden")), vec!["55667788", "11223344", "99AABBCC"]);
+        assert_eq!(report.incomplete, vec!["55667788"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repair_pack_index_fails_closed_on_unreadable_index() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = TempDir::new("storybox-repair-unreadable");
+        let mount = root.path().join("STORYBOX");
+        make_complete_story(&mount.join(".content").join("AABBCCDD"));
+        fs::create_dir_all(mount.join(".content").join("11223344")).unwrap();
+        let pi = mount.join(".pi");
+        write_pack_index_entries(&pi, &["11223344", "AABBCCDD"].map(short_entry)).unwrap();
+        // Écriture seule : illisible, mais une réécriture passerait.
+        fs::set_permissions(&pi, fs::Permissions::from_mode(0o200)).unwrap();
+        if fs::read(&pi).is_ok() {
+            eprintln!("droits ignorés ici : test sauté");
+            return;
+        }
+        let res = repair_pack_index_native(&mount.to_string_lossy());
+        fs::set_permissions(&pi, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(res.is_err(), "index illisible : la réparation doit échouer sans écrire ({res:?})");
+        assert!(res.unwrap_err().contains("Index non modifié"));
+        assert_eq!(index_order(&pi), vec!["11223344", "AABBCCDD"], "entrée incomplète non retirée");
     }
 
     #[test]

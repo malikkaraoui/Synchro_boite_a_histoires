@@ -1248,7 +1248,8 @@ $repairBtn.addEventListener("click", async () => {
     "  • Un import s'est interrompu (crash, déconnexion)\n" +
     "  • Des fichiers ont été copiés manuellement via le Finder\n" +
     "  • L'index semble corrompu ou incomplet\n\n" +
-    "Seules les histoires complètes sont indexées ; les dossiers incomplets\n" +
+    "Une histoire déjà indexée reste dans l'index tant que son dossier existe ;\n" +
+    "un dossier n'est ajouté que s'il est complet. Les dossiers incomplets\n" +
     "sont signalés dans le journal, jamais supprimés.\n\n" +
     "⚠️ Cette action NE change PAS l'ordre des histoires.\n" +
     "Pour réordonner, utilisez le glisser-déposer dans la liste.",
@@ -1271,7 +1272,7 @@ $repairBtn.addEventListener("click", async () => {
       ? `Index réparé nativement (${report.indexed} histoire(s)) — redémarre la boîte à histoires pour voir les histoires.`
       : `Index réparé (${report.indexed} histoire(s)) — redémarre la boîte à histoires pour voir les histoires.`);
     if (report.incomplete.length > 0) {
-      log("err", `${report.incomplete.length} dossier(s) incomplet(s) non indexé(s), laissé(s) sur la boîte : ${report.incomplete.join(", ")}`);
+      log("err", `${report.incomplete.length} dossier(s) incomplet(s), laissé(s) sur la boîte (gardé(s) dans l'index s'il(s) y étai(en)t, jamais ajouté(s)) : ${report.incomplete.join(", ")}`);
     }
   } catch (e) {
     log("err", `Réparation échouée : ${e}`);
