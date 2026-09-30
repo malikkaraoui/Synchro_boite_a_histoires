@@ -15,6 +15,11 @@
 > le protocole de test physique V3 (complété), la réparation d'index (dossiers complets
 > seulement) et le contrôle d'identité de la boîte (§ 3). Tests : 84.
 
+> **Mise à jour 2026-09-30 (M0007, réserves R3-1 à R3-4 du doublage R003).** Revus ici :
+> la récupération après interruption (jugée sur le contenu), le critère de réparation
+> d'index (aligné sur la référence, tableau ajouter/garder/retirer), `.content.hidden/`, les
+> fichiers AppleDouble `._*` et les diagnostics de bookmark (§ 3). Tests : 95.
+
 ---
 
 ## Contexte
@@ -96,23 +101,72 @@ nominal d'une mise à jour, l'UUID étant dérivé du nom du fichier.
   (instantané complet avant/après, testé en V2, v6 et v7).
 - Échec de la mise à jour de l'index : `.pi`/`.pi.hidden` sont remis octet pour octet et
   l'ancienne histoire est restaurée (testé).
-- Interruption brutale : au début de l'import suivant, `.<S>.tmp` est supprimé, `.<S>.old`
-  est supprimé si `<S>` existe, **restauré** en `<S>` sinon (coupure entre les deux
-  renommages). Les autres dossiers cachés ne sont jamais touchés.
+- Interruption brutale : au début de l'import suivant **et** de « Réparer l'index »
+  (`storybox_import::repair_pack_index`, M0007), les restes sont jugés sur leur **contenu**
+  (`is_complete_story_dir`, critère ci-dessous), jamais sur leur seule présence :
+
+  | État trouvé | Action |
+  |---|---|
+  | `.<S>.tmp` | supprimé (histoire jamais installée) |
+  | `.<S>.old` sans `<S>` | **restauré** en `<S>` (coupure entre les deux renommages), signalé |
+  | `.<S>.old` et `<S>` complet | `.old` supprimé (remplacement abouti) |
+  | `.<S>.old` complet et `<S>` incomplet | **échangés** : `.old` redevient `<S>`, la copie incomplète passe en `.<S>.tmp` puis est supprimée ; signalé |
+  | ni l'un ni l'autre complet | **rien n'est supprimé**, signalé ; un réimport de `<S>` échoue alors sans rien modifier (« Mise de côté… ») jusqu'à ce qu'un des deux soit retiré à la main |
+
+  L'avant-dernière ligne ferme R3-1 (R003, A2) : après un double échec (index **et** retrait
+  partiel de la nouvelle histoire), `.old` est la seule copie saine ; avant M0007, l'import
+  suivant de **n'importe quelle** histoire la supprimait. Chaque étape de l'échange laisse un
+  état que ce même nettoyage sait reprendre. Les signalements vont au journal de l'app
+  (`⚠ Import interrompu : …`, et `PackIndexRepair.leftovers` pour la réparation). Les autres
+  dossiers cachés ne sont jamais touchés.
 - Un échec de retour arrière n'est plus tu : il est ajouté au message d'erreur.
 - Les dossiers commençant par `.` sont ignorés par l'inventaire, le comptage et la
   réparation d'index.
 - Limite : un renommage de dossier sur FAT n'est pas atomique face à un débranchement ;
-  la fenêtre se réduit à deux appels système, et le nettoyage ci-dessus la referme.
+  la fenêtre se réduit à deux appels système, que le nettoyage ci-dessus reprend. Le
+  nettoyage ne sait rien d'un dossier `<S>` abîmé autrement (fichier corrompu mais présent) :
+  la complétude est jugée sur la présence des fichiers, pas sur leur contenu chiffré.
 
-**Réparation d'index (M0006, réserve R-3 de R001)** : `repair_pack_index_native` n'indexe
-que les dossiers `.content/<S>` **complets** (`ni`, `li`, `ri`, `si` et `bt` présents). Les
-incomplets sont renvoyés (`PackIndexRepair.incomplete`) et signalés dans le journal de
-l'app, **jamais supprimés** automatiquement ; une entrée de `.pi` qui désigne un dossier
-incomplet en sort. Le format des entrées de `.pi` n'a **pas** changé (voir Écarts connus).
-Hypothèse : toute histoire officielle contient ces cinq fichiers (c'est ce qu'écrit la
-référence en V2 comme en V3) ; non vérifié sur une V3 réelle. Si ce n'est pas le cas, le
-journal de l'app nomme les dossiers exclus de l'index (protocole V3, étape 5).
+**Réparation d'index (M0006, revue en M0007 — réserve R3-2 de R003)** :
+`repair_pack_index_native` suit le critère de la référence (`device_storybox.py`,
+`recover_stories` et `__valid_story`), qui distingue **ajouter** et **retirer** :
+
+| Cas | Action | Référence |
+|---|---|---|
+| Entrée de `.pi` / `.pi.hidden` dont le dossier existe (`.content/<S>` ou `.content.hidden/<S>`), complet | **gardée**, à sa place | « Already in list » |
+| Même cas, dossier **incomplet** | **gardée**, à sa place, et listée dans `incomplete` | « Already in list but invalid » : journalisé seulement |
+| Entrée dont le dossier n'existe plus | **retirée** | `update_pack_index` ne réécrit que les histoires connues |
+| Dossier absent des deux index, **complet** | **ajouté** en fin de `.pi` (depuis `.content/`) ou de `.pi.hidden` (depuis `.content.hidden/`) | « Recovered » |
+| Dossier absent des deux index, **incomplet** | **non ajouté**, listé dans `incomplete`, jamais supprimé | « Skipping lost story (seems broken/incomplete) » |
+
+**Complet** (`is_complete_story_dir`) : `ni`, `li`, `ri` et `si` présents (fichiers exigés
+par `__valid_story`), plus `bt` **seulement** si le dossier porte le sidecar
+`.la-forge-a-histoires.json`, c'est-à-dire s'il a été écrit par l'app, qui écrit toujours
+`bt`. La référence n'exige pas `bt` : en V2 elle le **régénère** (`cipher(ri[:0x40],
+device_key)`), en V3 elle retombe sur les clés dérivées du `.md`. La référence vérifie en
+plus `rf`, `sf` et chaque ressource listée par `ri`/`si` (déchiffrement) ; l'app ne le fait
+pas.
+
+Avant M0007, le critère exigeait les cinq fichiers et **retirait** de `.pi` une entrée
+incomplète : une histoire officielle à laquelle il manquait un fichier (même `bt`)
+disparaissait du menu au prochain import de n'importe quelle histoire (R003, test C). « C'est
+ce qu'écrit la référence » était exact pour l'**écriture**, faux pour la **validation**.
+
+**`.content.hidden/`** : la référence range les histoires cachées dans `.content.hidden/<S>`
+(`HIDDEN_STORIES_BASEDIR`, `device_storybox.py:30` ; déplacement par `main_window.py:1100-1136`,
+lecture par `recover_stories`, `cleanup_stories`, `export_*`, `__clean_up_story_dir`).
+La réparation lit ce dossier : une entrée de `.pi.hidden` dont le dossier y existe n'en sort
+jamais. Avant M0007, seul `.content/` était lu, et une histoire cachée par la référence
+sortait de `.pi.hidden` au premier import. L'app, elle, ne cache ni ne déplace aucune
+histoire ; son inventaire ne liste que `.content/`.
+
+**Index illisible** : un `.pi` ou `.pi.hidden` absent ou de taille non multiple de 16 est
+reconstruit depuis les dossiers ; illisible (droits, E/S), la réparation échoue **sans rien
+écrire** (avant M0007, il était lu comme vide et les entrées incomplètes étaient perdues).
+
+Le format des entrées de `.pi` n'a **pas** changé (voir Écarts connus) : hachages des
+fonctions d'écriture de `.pi`, de `write_story_files` (V2, `ni`, `bt`) et de
+`write_story_files_v3` identiques au tip M0006 `c751c53`.
 
 ### `main.rs` — `start_sync_native` (App Store)
 
@@ -197,7 +251,7 @@ L'app ne transcode pas l'audio : la référence convertit en MP3 mono 44,1 kHz e
 2. Lire la version **avant tout import** : `xxd -l 1 "$B/.md"` → `06` ou `07` : supporté ; `08` ou plus : l'app refusera sans rien écrire (le signaler, fin du test). Taille : `stat -f %z "$B/.md"` → attendu `112` ou `128`. Firmware : `xxd -s 2 -l 5 "$B/.md"`.
 3. Sauvegarder : `mkdir -p ~/boite-v3-test && cp "$B/.md" "$B/.pi" ~/boite-v3-test/ && ls "$B/.content" > ~/boite-v3-test/content-avant.txt`, puis garder l'index lisible : `xxd "$B/.pi" > ~/boite-v3-test/pi-avant.txt`. Noter le titre d'**une histoire officielle** qui se lit aujourd'hui sur la boîte.
 4. Préparer un MP3 court, mono, 44,1 kHz, sans tags (l'app ne convertit pas). Avec ffmpeg, si installé : `ffmpeg -i source.mp3 -ac 1 -ar 44100 -map_metadata -1 -id3v2_version 0 test-v3.mp3`.
-5. Importer `test-v3.mp3` depuis l'app App Store construite depuis la branche. Noter le message affiché. Puis : `xxd "$B/.pi" > ~/boite-v3-test/pi-apres.txt` et `diff ~/boite-v3-test/pi-avant.txt ~/boite-v3-test/pi-apres.txt` (attendu : toutes les entrées passent en UUID court, plus une nouvelle). Dans le journal de l'app, **aucune** ligne « dossier(s) incomplet(s) non indexé(s) » ne doit apparaître ; sinon, la recopier.
+5. Importer `test-v3.mp3` depuis l'app App Store construite depuis la branche. Noter le message affiché. Puis : `xxd "$B/.pi" > ~/boite-v3-test/pi-apres.txt` et `diff ~/boite-v3-test/pi-avant.txt ~/boite-v3-test/pi-apres.txt` (attendu : toutes les entrées passent en UUID court, plus une nouvelle). Dans le journal de l'app, **aucune** ligne « dossier(s) incomplet(s) » ni « Import interrompu » ne doit apparaître ; sinon, la recopier (depuis M0007, une histoire officielle incomplète reste dans l'index mais y est nommée).
 6. Éjecter proprement (`diskutil eject "$B"`), débrancher, redémarrer la boîte, chercher l'histoire, écouter jusqu'au bout. Noter si la **couverture** s'affiche (hypothèse PNG).
 7. **Succès, les deux critères** : (a) l'histoire importée apparaît et se lit normalement ; (b) **l'histoire officielle notée à l'étape 3 apparaît encore et se lit** (hypothèse `.pi` en UUID court). Refaire une fois avec un second MP3 pour confirmer.
 
@@ -226,6 +280,29 @@ de série est inchangé ; toute commande d'écriture compare le montage, l'ident
 par le front et le numéro de série **relu sur la boîte** ; `start_sync` le revérifie avant
 chaque fichier. Une autre boîte montée au même point est refusée. Les diagnostics
 `[sandbox]` apparaissent aussi dans le journal de l'app (évènement `sandbox:log`).
+
+**Bookmark qui ne rouvre pas la boîte (M0007, réserve R3-3 de R003)** : quand la boîte est
+montée mais illisible (`access_required`), chaque bookmark mémorisé qui **ne se résout
+pas**, se résout vers un **autre** montage, ou ouvre une boîte d'une **autre identité**
+produit une ligne `[sandbox] bookmark de la boîte <id> …` (Terminal et tiroir de journal).
+Une seule ligne par message et par session : la détection repasse toutes les 3 s, et le
+bookmark d'une boîte débranchée ne se résout jamais.
+
+### Fichiers AppleDouble `._*` (M0007, réserve R3-4 de R003)
+
+Sur un volume FAT/exFAT monté par macOS, tout processus porteur de l'attribut
+`com.apple.provenance` (l'app, un test, un simple `cp`) fait créer par le système un fichier
+`._<nom>` (4 096 o) à côté de chaque fichier ou dossier écrit. Mesuré sur image FAT32
+(R003 puis M0007 : `mkdir tmp` → `._tmp`, `cp` → `._histoire.mp3`).
+- `scan_audio_folder` ignore `._*` et `.DS_Store` (avant M0007, `._x.mp3` était proposé à
+  l'import depuis une clé FAT/exFAT) ;
+- la taille et la couverture d'une histoire les ignorent ;
+- l'inventaire, le nettoyage et la réparation les ignoraient déjà (entrées commençant par `.`) ;
+- non vérifié : que le firmware de la boîte ignore les `._*`, et que l'app sandboxée en
+  provoque sur la boîte.
+Les tests qui comparent une arborescence exacte ignorent ces fichiers : la suite passe
+entière sur image FAT32 (95/95, dont 2 tests de droits sautés car FAT ignore `chmod`), là où
+la suite M0006 en perdait 6.
 
 ### 4. Soumission App Store Connect
 
