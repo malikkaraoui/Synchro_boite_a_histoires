@@ -4,6 +4,13 @@
 
 ## Courrier entrant
 
+### 2026-06-10 — Fix sync variante Python : dépendance fantôme StoryBox.QT [auto]
+
+- Source : Claude (claude-opus-4-8[1m])
+- Statut : appliqué — **en attente confirmation sync utilisateur**
+- Résumé : La sync échouait systématiquement (boîte « Mia » HW v2 sur `/Volumes/LUNII`) au setup : `git clone … o-daneel/StoryBox.QT.git` → *Repository not found* (exit 128). Cause : `boite-bridge.py` clonait à chaque sync un **repo GitHub inexistant** — `StoryBox.QT` n'était qu'un dossier local (clone renommé de `o-daneel/Lunii.QT`), gitignoré + repo imbriqué, donc non versionné. La variante racine n'avait jamais réussi de sync depuis le refactor du 22 mai. Correctif en 4 temps : (1) déblocage immédiat — cache `~/.synchro_boite_a_histoires/` peuplé avec la lib + le binaire SPG déjà présents localement (`~/.luniisync/`), sans rebuild ; (2) `_bootstrap_storybox_qt()` réécrit — **suppression du `git clone`**, copie de la lib vendorisée à la place ; (3) **vendorisation** de `StoryBox.QT/pkg/` (≈420K, 20 fichiers) dans le dépôt + ajout aux resources Tauri (`../StoryBox.QT/pkg`), `.git` imbriqué supprimé, `.gitignore` ajusté (resources_rc.py 3,5 Mo et .exe Windows exclus) ; (4) chaîne d'import vérifiée OK avec le python de l'app (3.13.9, toutes deps présentes). Changements stagés, **non commités**.
+- Prochaine action : utilisateur relance **Synchroniser** dans l'app (le fichier « Une journée à Versailles… » doit passer `Dans la boîte`). Puis : commit du correctif + rebuild propre `cargo tauri build` pour valider zéro-réseau. Stratégique : pour boîtes V2, la build native Mac App Store (zéro Python/clone) reste la cible roadmap.
+
 ### 2026-06-03/05 — Session validation device V2 + corrections import [auto]
 
 - Source : Claude (claude-sonnet-4-6)

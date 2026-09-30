@@ -84,3 +84,11 @@
 
 - **Découverte** : Les crates `reqwest` et `open` peuvent rester dans Cargo.toml sans violer les règles App Store — l'important est que les chemins de code qui les appellent soient exclus via `#[cfg(not(feature = "mac-app-store"))]`. Apple inspecte le comportement runtime, pas les symboles compilés inactifs.
 - **Source** : `mac-app-store/NATIVE_IMPORT.md §Bloqueurs`
+
+### 2026-06-10 · Dépendance fantôme : la variante Python clonait un repo GitHub inexistant
+
+- **Découverte critique** : `boite-bridge.py` (`_bootstrap_storybox_qt`) tentait à **chaque** sync de cloner `https://github.com/o-daneel/StoryBox.QT.git` dans `~/.synchro_boite_a_histoires/StoryBox.QT/`. **Ce dépôt n'existe pas** : `StoryBox.QT` n'a jamais été qu'un dossier local (clone de `o-daneel/Lunii.QT` puis renommage `device_lunii.py`→`device_storybox.py`). La variante racine n'a donc **jamais** réussi de sync depuis le refactor du 22 mai (commit 8f9c642). Les histoires « Non gérées » présentes sur les boîtes viennent de l'ancienne app LuniiSync.
+- **Cause structurelle** : `StoryBox.QT/` était gitignoré + repo git imbriqué → non versionné → le code comptait le recloner au runtime. Fragile (réseau + repo fantôme) et incompatible sandbox App Store.
+- **Correctif** : lib **vendorisée** — seul `pkg/` (≈420K, le sidecar n'importe que `pkg.api.*`) est versionné et embarqué dans les resources Tauri (`../StoryBox.QT/pkg`). `_bootstrap_storybox_qt` copie désormais la copie locale, **plus aucun `git clone`**. `resources_rc.py` (3,5 Mo) et `tools/*.exe` exclus (GUI/Windows only, non importés).
+- **Vérifié** : chaîne `from pkg.api.device_storybox import StoryBoxDevice` OK avec le python de l'app (python.org 3.13.9 ; deps présentes : psutil, xxtea, pycryptodome, py7zr, PIL, PySide6).
+- **Source** : `boite-bridge.py:40-55`, `.gitignore`, `src-tauri/tauri.conf.json:30`, `StoryBox.QT/pkg/api/devices.py` (familles `is_storybox`/`is_flam`)
