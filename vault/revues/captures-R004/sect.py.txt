@@ -1,0 +1,13 @@
+import sys, subprocess, hashlib, struct
+def sect(path, seg, sec):
+    out = subprocess.run(["otool","-l",path],capture_output=True,text=True).stdout.split("\n")
+    for i,l in enumerate(out):
+        if l.strip()==f"sectname {sec}" and out[i+1].strip()==f"segname {seg}":
+            blk=out[i:i+12]
+            size=int([x for x in blk if x.strip().startswith("size")][0].split()[1],16)
+            off=int([x for x in blk if x.strip().startswith("offset")][0].split()[1])
+            data=open(path,"rb").read()[off:off+size]
+            return hashlib.sha256(data).hexdigest()[:16], size
+for p in sys.argv[1:]:
+    t=sect(p,"__TEXT","__text"); c=sect(p,"__DATA_CONST","__const")
+    print(t[0], c[0], t[1], p)

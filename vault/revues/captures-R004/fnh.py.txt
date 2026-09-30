@@ -1,0 +1,21 @@
+import sys, subprocess, hashlib, re
+rev=sys.argv[1]
+targets={"storybox_import.rs":["write_story_files","make_bt_v2"],"storybox_v3.rs":["write_story_files_v3"],
+ "storybox_device.rs":["write_pack_index_entries","read_pack_index_entries","write_all_pack_index_entries","short_uuid_to_uuid_bytes","short_uuid_from_uuid_bytes"],
+ "studio_story.rs":["ni_data","generate_ni","build_ni"],"storybox_crypto.rs":["make_bt_v2","cipher_story_data"]}
+def body(src,name):
+    m=re.search(r'^[ \t]*(pub(\([a-z]+\))? )?fn '+re.escape(name)+r'\b',src,re.M)
+    if not m: return None
+    i=src.index('{',m.start()); d=0
+    for j in range(i,len(src)):
+        if src[j]=='{': d+=1
+        elif src[j]=='}':
+            d-=1
+            if d==0: return src[m.start():j+1]
+for f,names in targets.items():
+    r=subprocess.run(["git","show",f"{rev}:mac-app-store/src-tauri/src/{f}"],capture_output=True,text=True)
+    if r.returncode: print(f"{f}: absent"); continue
+    print(f"{f} fichier {hashlib.sha256(r.stdout.encode()).hexdigest()[:20]}")
+    for n in names:
+        b=body(r.stdout,n)
+        if b: print(f"   {n:32s} {hashlib.sha256(b.encode()).hexdigest()[:20]}")

@@ -1,0 +1,360 @@
+//! Sonde R004 (doubleur) — tests TEMPORAIRES, jamais committés.
+//! Branchée par une seule ligne `#[cfg(test)] #[path = …] mod r004_probe;` ajoutée puis retirée de main.rs.
+//! Tout passe par le vrai code du tip : `import_story`, `install_story`, `repair_pack_index`,
+//! `repair_pack_index_native`, `clean_import_leftovers`, `remove_orphan_story`.
+#![allow(dead_code)]
+
+use crate::storybox_device;
+use crate::storybox_import::{clean_import_leftovers, import_story, repair_pack_index};
+use crate::storybox_v3::test_fixtures::{md_v5, md_v7, sha256_hex};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const UUID_S: &str = "12345678-9abc-4def-8123-456789abcdef"; // → 89ABCDEF
+const UUID_T: &str = "12345678-9abc-4def-8123-4567cafe0001"; // → CAFE0001
+
+fn story_json(uuid: &str) -> String {
+    format!(
+        r#"{{"format": "v1", "version": 1, "title": "R004", "description": "", "nightModeAvailable": false, "factoryPack": false, "stageNodes": [{{"uuid": "{uuid}", "squareOne": true, "audio": "histoire.mp3", "image": "image001.bmp", "controlSettings": {{"wheel": false, "ok": false, "home": true, "pause": true, "autoplay": true}}, "okTransition": null, "homeTransition": null}}], "actionNodes": [], "listNodes": []}}"#
+    )
+}
+
+fn pattern(len: usize, a: usize, b: usize) -> Vec<u8> {
+    (0..len).map(|i| ((i * a + b) & 0xFF) as u8).collect()
+}
+
+fn write_pack(dir: &Path, name: &str, uuid: &str, audio: &[u8]) -> PathBuf {
+    let zip_path = dir.join(name);
+    let mut w = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+    let o = zip::write::SimpleFileOptions::default();
+    w.start_file("story.json", o).unwrap();
+    w.write_all(story_json(uuid).as_bytes()).unwrap();
+    w.start_file("assets/histoire.mp3", o).unwrap();
+    w.write_all(audio).unwrap();
+    w.start_file("assets/image001.bmp", o).unwrap();
+    w.write_all(&pattern(700, 19, 29)).unwrap();
+    w.finish().unwrap();
+    zip_path
+}
+
+fn new_mount(md: &[u8]) -> (tempfile::TempDir, PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let mount = root.path().join("BOX");
+    fs::create_dir_all(mount.join(".content")).unwrap();
+    fs::write(mount.join(".md"), md).unwrap();
+    (root, mount)
+}
+
+fn packs_dir() -> tempfile::TempDir {
+    tempfile::Builder::new().tempdir_in("/private/tmp").unwrap()
+}
+
+fn import_log(mount: &Path, zip: &Path) -> (Result<String, String>, Vec<String>) {
+    let log = RefCell::new(vec![]);
+    let r = import_story(mount.to_str().unwrap(), zip, "r004", "sha256:r004", &|m| log.borrow_mut().push(m.to_string()))
+        .map(|r| r.short_uuid);
+    (r, log.into_inner())
+}
+
+fn is_meta(name: &str) -> bool {
+    name.starts_with("._") || name == ".DS_Store"
+}
+
+fn snapshot(root: &Path) -> BTreeMap<String, (usize, String)> {
+    fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, (usize, String)>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            if is_meta(&entry.file_name().to_string_lossy()) {
+                continue;
+            }
+            let path = entry.path();
+            let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+            if path.is_dir() {
+                out.insert(format!("{rel}/"), (0, "dir".into()));
+                walk(root, &path, out);
+            } else {
+                let data = fs::read(&path).unwrap();
+                out.insert(rel, (data.len(), sha256_hex(&data)));
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    if root.exists() {
+        walk(root, root, &mut out);
+    }
+    out
+}
+
+fn pi_short(mount: &Path, name: &str) -> Vec<String> {
+    fs::read(mount.join(name))
+        .unwrap_or_default()
+        .chunks(16)
+        .map(|c| hex::encode_upper(&c[c.len().saturating_sub(4)..]))
+        .collect()
+}
+
+fn names(dir: &Path) -> Vec<String> {
+    let mut v: Vec<_> = fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    v.sort();
+    v
+}
+
+fn raw_order(dir: &Path) -> Vec<String> {
+    fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).filter(|n| !is_meta(n)).collect()
+}
+
+fn chflags(p: &Path, flag: &str) {
+    let st = Command::new("chflags").arg(flag).arg(p).status().unwrap();
+    assert!(st.success(), "chflags {flag} {p:?}");
+}
+
+fn first_file(dir: &Path) -> PathBuf {
+    fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).find(|p| p.is_file() && !is_meta(&p.file_name().unwrap().to_string_lossy())).unwrap()
+}
+
+fn complete(dir: &Path) {
+    fs::create_dir_all(dir.join("sf/000")).unwrap();
+    fs::create_dir_all(dir.join("rf/000")).unwrap();
+    for f in ["ni", "li", "ri", "si", "bt"] {
+        fs::write(dir.join(f), f.as_bytes()).unwrap();
+    }
+    fs::write(dir.join("sf/000/AUDIO"), b"audio").unwrap();
+}
+
+// ── P1 : double échec RÉEL (index KO + retrait partiel de la nouvelle) où le retrait échoue
+//        dans sf/ ou rf/ : les fichiers de tête (ni li ri si bt + sidecar) restent. ────────────
+#[test]
+fn r004_p1_husk_after_real_double_failure() {
+    let (_root, mount) = new_mount(&md_v5());
+    let packs = packs_dir();
+    let content = mount.join(".content");
+    let s1 = write_pack(packs.path(), "s1.zip", UUID_S, &pattern(3000, 31, 17));
+    assert_eq!(import_log(&mount, &s1).0.unwrap(), "89ABCDEF");
+    let old_s = snapshot(&content.join("89ABCDEF"));
+    eprintln!("R004 P1 fs={} ordre readdir de <S> = {:?}", std::env::var("R004_FS").unwrap_or("?".into()), raw_order(&content.join("89ABCDEF")));
+
+    // 1er échec : .pi.hidden en dossier (l'index échoue APRÈS le remplacement).
+    fs::remove_file(mount.join(".pi.hidden")).unwrap();
+    fs::create_dir_all(mount.join(".pi.hidden")).unwrap();
+    // 2e échec : au moment de l'index, un fichier du PREMIER sous-dossier parcouru devient
+    // non supprimable (chflags uchg, respecté par APFS et par msdos).
+    let s2 = write_pack(packs.path(), "s2.zip", UUID_S, &pattern(3000, 7, 3));
+    let locked: RefCell<Option<PathBuf>> = RefCell::new(None);
+    let live = content.join("89ABCDEF");
+    let log = RefCell::new(vec![]);
+    let r = import_story(mount.to_str().unwrap(), &s2, "r004", "h", &|m| {
+        log.borrow_mut().push(m.to_string());
+        if m.starts_with("Mise à jour de l'index") {
+            let order = raw_order(&live);
+            let last_sub = order.iter().filter(|n| live.join(n).is_dir()).last().unwrap().clone();
+            let target = first_file(&live.join(&last_sub).join("000"));
+            chflags(&target, "uchg");
+            *locked.borrow_mut() = Some(target);
+        }
+    });
+    let err = r.unwrap_err();
+    let target = locked.borrow().clone().unwrap();
+    chflags(&target, "nouchg");
+    eprintln!("R004 P1 err = {err}");
+    eprintln!("R004 P1 .content après échec = {:?}", names(&content));
+    eprintln!("R004 P1 <S> après échec = {:?}", snapshot(&live).keys().collect::<Vec<_>>());
+    let husk_complete = storybox_device::is_complete_story_dir(&live);
+    eprintln!("R004 P1 is_complete_story_dir(<S>) = {husk_complete}");
+    assert!(content.join(".89ABCDEF.old").is_dir(), "l'ancienne est en .old");
+
+    // L'erreur transitoire disparaît ; l'utilisateur importe une AUTRE histoire.
+    fs::remove_dir_all(mount.join(".pi.hidden")).unwrap();
+    let t = write_pack(packs.path(), "t.zip", UUID_T, &pattern(900, 5, 1));
+    let (rt, logt) = import_log(&mount, &t);
+    eprintln!("R004 P1 import T = {rt:?} ; journal = {:?}", logt.iter().filter(|l| l.contains('⚠')).collect::<Vec<_>>());
+    let old_somewhere = content.join(".89ABCDEF.old").exists() || snapshot(&live) == old_s;
+    let fin = snapshot(&live);
+    let playable = ["ni", "li", "ri", "si", "bt", "rf/000/IMAGE001", "sf/000/HISTOIRE"].iter().all(|k| fin.contains_key(*k));
+    eprintln!("R004 P1 ancienne histoire encore présente = {old_somewhere} ; <S> final avec toutes ses ressources = {playable}");
+    eprintln!("R004 P1 <S> final = {:?}", snapshot(&live).keys().collect::<Vec<_>>());
+    eprintln!("R004 P1 .pi = {:?}", pi_short(&mount, ".pi"));
+    let rep = storybox_device::repair_pack_index_native(mount.to_str().unwrap()).unwrap();
+    eprintln!("R004 P1 réparation : indexed {} incomplete {:?}", rep.indexed, rep.incomplete);
+    assert!(old_somewhere || playable, "PERTE : ni .old ni l'ancienne <S> ; <S> = coquille indexée");
+}
+
+// ── P2 : coupures pendant l'ÉCHANGE de clean_import_leftovers (états construits) ──────────────
+#[test]
+fn r004_p2_interrupted_swap_states() {
+    // (a) après `<S>` → `.S.tmp`, avant `.old` → `<S>` ; (b) après `.old` → `<S>`, avant la suppression.
+    for case in ["a", "b"] {
+        let (_root, mount) = new_mount(&md_v7());
+        let content = mount.join(".content");
+        complete(&content.join(".89ABCDEF.old"));
+        fs::write(content.join(".89ABCDEF.old/sf/000/AUDIO"), b"ancienne complete").unwrap();
+        let old = snapshot(&content.join(".89ABCDEF.old"));
+        let incomplete_dir = content.join(".89ABCDEF.tmp");
+        fs::create_dir_all(incomplete_dir.join("sf/000")).unwrap();
+        fs::write(incomplete_dir.join("li"), b"partiel").unwrap();
+        if case == "b" {
+            fs::rename(content.join(".89ABCDEF.old"), content.join("89ABCDEF")).unwrap();
+        }
+        let notices = clean_import_leftovers(&content).unwrap();
+        eprintln!("R004 P2[{case}] notices = {notices:?} ; .content = {:?}", names(&content));
+        assert_eq!(snapshot(&content.join("89ABCDEF")), old, "[{case}] ancienne complète en place");
+        assert!(!incomplete_dir.exists() && !content.join(".89ABCDEF.old").exists());
+    }
+    // (c) coupure entre les deux renommages de l'INSTALLATION, transit complet (nouvelle) +
+    //     .old complet (ancienne), pas de <S> : l'ancienne est restaurée, la nouvelle jetée.
+    let (_root, mount) = new_mount(&md_v7());
+    let content = mount.join(".content");
+    complete(&content.join(".89ABCDEF.old"));
+    complete(&content.join(".89ABCDEF.tmp"));
+    fs::write(content.join(".89ABCDEF.tmp/sf/000/AUDIO"), b"nouvelle").unwrap();
+    let old = snapshot(&content.join(".89ABCDEF.old"));
+    let notices = clean_import_leftovers(&content).unwrap();
+    eprintln!("R004 P2[c] notices = {notices:?} ; .content = {:?}", names(&content));
+    assert_eq!(snapshot(&content.join("89ABCDEF")), old);
+}
+
+// ── P3 : « aucun complet » → réimport bloqué ; sortie par suppression + réimport (ce que fait
+//        la synchro : remove_orphan_story d'abord, puis start_sync) ; réparation entre-temps. ───
+#[test]
+fn r004_p3_neither_complete_then_reimport_paths() {
+    let (_root, mount) = new_mount(&md_v7());
+    let packs = packs_dir();
+    let content = mount.join(".content");
+    let s1 = write_pack(packs.path(), "s1.zip", UUID_S, &pattern(3000, 31, 17));
+    import_log(&mount, &s1).0.unwrap();
+    fs::remove_file(content.join("89ABCDEF/ni")).unwrap(); // <S> incomplet
+    fs::create_dir_all(content.join(".89ABCDEF.old")).unwrap();
+    fs::write(content.join(".89ABCDEF.old/li"), b"partiel").unwrap(); // .old incomplet
+    let pi0 = pi_short(&mount, ".pi");
+
+    // Réparation : rien supprimé, signalé, <S> reste indexé.
+    let rep = repair_pack_index(mount.to_str().unwrap()).unwrap();
+    eprintln!("R004 P3 réparation : leftovers {:?} incomplete {:?} .pi {:?}", rep.leftovers, rep.incomplete, pi_short(&mount, ".pi"));
+    assert_eq!(pi_short(&mount, ".pi"), pi0, "<S> gardé dans l'index");
+    assert!(content.join(".89ABCDEF.old").is_dir());
+
+    // Réimport direct : bloqué, boîte identique.
+    let before = snapshot(&mount);
+    let s2 = write_pack(packs.path(), "s2.zip", UUID_S, &pattern(3000, 7, 3));
+    let (r, _) = import_log(&mount, &s2);
+    eprintln!("R004 P3 réimport direct = {r:?}");
+    assert!(r.is_err());
+    assert_eq!(snapshot(&mount), before, "boîte identique");
+
+    // Sortie UI : suppression de S (remove_orphan_story) puis réimport, comme une synchro.
+    crate::storybox_sync::remove_orphan_story(mount.to_str().unwrap(), "89ABCDEF").unwrap();
+    let (r, log) = import_log(&mount, &s2);
+    eprintln!("R004 P3 suppression + réimport = {r:?} ; ⚠ = {:?}", log.iter().filter(|l| l.contains('⚠')).collect::<Vec<_>>());
+    eprintln!("R004 P3 .content final = {:?} ; .pi = {:?}", names(&content), pi_short(&mount, ".pi"));
+    assert_eq!(r.unwrap(), "89ABCDEF");
+    assert!(storybox_device::is_complete_story_dir(&content.join("89ABCDEF")));
+    assert!(!content.join(".89ABCDEF.old").exists());
+}
+
+// ── P4 : réparation lancée PENDANT un import (le front ne l'interdit pas : `syncing` n'est pas
+//        posé par la réparation, et aucun verrou côté Rust). Simulée de façon déterministe au
+//        moment « Mise à jour de l'index… », suivie d'un échec d'index. ───────────────────────
+#[test]
+fn r004_p4_repair_concurrent_with_reimport() {
+    let (_root, mount) = new_mount(&md_v5());
+    let packs = packs_dir();
+    let content = mount.join(".content");
+    let s1 = write_pack(packs.path(), "s1.zip", UUID_S, &pattern(3000, 31, 17));
+    import_log(&mount, &s1).0.unwrap();
+    fs::remove_file(mount.join(".pi.hidden")).unwrap();
+    fs::create_dir_all(mount.join(".pi.hidden")).unwrap(); // l'index échouera
+    let s2 = write_pack(packs.path(), "s2.zip", UUID_S, &pattern(3000, 7, 3));
+    let m = mount.to_str().unwrap().to_string();
+    let repair_res = RefCell::new(None);
+    let r = import_story(&m, &s2, "r004", "h", &|msg| {
+        if msg.starts_with("Mise à jour de l'index") {
+            *repair_res.borrow_mut() = Some(repair_pack_index(&m).map(|x| x.leftovers));
+        }
+    });
+    eprintln!("R004 P4 réparation concurrente = {:?}", repair_res.borrow());
+    eprintln!("R004 P4 import = {:?}", r.as_ref().map(|x| &x.short_uuid));
+    eprintln!("R004 P4 .content = {:?}", names(&content));
+    let s_exists = content.join("89ABCDEF").is_dir() || content.join(".89ABCDEF.old").is_dir();
+    eprintln!("R004 P4 une version de S subsiste = {s_exists}");
+}
+
+// ── P5 : index illisible ou tronqué : blocage des imports ? entrées retirées ? ─────────────────
+#[cfg(unix)]
+#[test]
+fn r004_p5_unreadable_or_truncated_index() {
+    use std::os::unix::fs::PermissionsExt;
+    // (a) .pi illisible : import d'une AUTRE histoire.
+    let (_root, mount) = new_mount(&md_v5());
+    let packs = packs_dir();
+    let content = mount.join(".content");
+    let s1 = write_pack(packs.path(), "s1.zip", UUID_S, &pattern(900, 31, 17));
+    import_log(&mount, &s1).0.unwrap();
+    let pi = mount.join(".pi");
+    fs::set_permissions(&pi, fs::Permissions::from_mode(0o200)).unwrap();
+    if fs::read(&pi).is_ok() {
+        eprintln!("R004 P5a : droits ignorés ici, sauté");
+    } else {
+        let before = snapshot(&content);
+        let t = write_pack(packs.path(), "t.zip", UUID_T, &pattern(900, 5, 1));
+        let (r, _) = import_log(&mount, &t);
+        let rep = repair_pack_index(mount.to_str().unwrap());
+        fs::set_permissions(&pi, fs::Permissions::from_mode(0o644)).unwrap();
+        eprintln!("R004 P5a import T avec .pi illisible = {r:?}");
+        eprintln!("R004 P5a réparation = {:?}", rep.as_ref().map(|x| x.indexed));
+        eprintln!("R004 P5a .content identique = {}", snapshot(&content) == before);
+    }
+    // (b) .pi tronqué (taille non multiple de 16) : officielle incomplète déjà indexée + ordre.
+    let (_root, mount) = new_mount(&md_v5());
+    let content = mount.join(".content");
+    complete(&content.join("AABBCCDD"));
+    fs::remove_file(content.join("AABBCCDD/ni")).unwrap();
+    complete(&content.join("11223344"));
+    complete(&content.join("55667788"));
+    let mut data = Vec::new();
+    for s in ["55667788", "AABBCCDD", "11223344"] {
+        let mut e = [0u8; 16];
+        e[12..].copy_from_slice(&hex::decode(s).unwrap());
+        data.extend_from_slice(&e);
+    }
+    data.extend_from_slice(&[1, 2, 3]);
+    fs::write(mount.join(".pi"), &data).unwrap();
+    let rep = repair_pack_index(mount.to_str().unwrap()).unwrap();
+    eprintln!("R004 P5b .pi tronqué [55667788, AABBCCDD(incomplète), 11223344]+3o → {:?} ; incomplete {:?}", pi_short(&mount, ".pi"), rep.incomplete);
+}
+
+// ── P6 : AppleDouble réels (FAT) : aucune entrée `._*` ne compte nulle part. ───────────────────
+#[test]
+fn r004_p6_appledouble_everywhere() {
+    let (_root, mount) = new_mount(&md_v7());
+    let packs = packs_dir();
+    let s = write_pack(packs.path(), "s.zip", UUID_S, &pattern(900, 31, 17));
+    import_log(&mount, &s).0.unwrap();
+    let content = mount.join(".content");
+    // AppleDouble artificiels en plus de ceux que pose macOS sur FAT.
+    fs::write(content.join("._89ABCDEF"), vec![0u8; 4096]).unwrap();
+    fs::write(content.join("._DEADBEEF"), vec![0u8; 4096]).unwrap();
+    fs::write(content.join(".DS_Store"), b"x").unwrap();
+    fs::write(content.join("89ABCDEF/._ni"), vec![0u8; 4096]).unwrap();
+    fs::write(content.join("89ABCDEF/sf/000/._X"), vec![0u8; 4096]).unwrap();
+    let all: Vec<_> = names(&content);
+    let inv = storybox_device::read_inventory(&mount).unwrap();
+    let rep = repair_pack_index(mount.to_str().unwrap()).unwrap();
+    let notices = clean_import_leftovers(&content).unwrap();
+    eprintln!("R004 P6 fs={} .content brut = {all:?}", std::env::var("R004_FS").unwrap_or("?".into()));
+    eprintln!("R004 P6 inventaire = {:?} ; tailles = {:?}", inv.stories.iter().map(|s| &s.short_uuid).collect::<Vec<_>>(), inv.stories.iter().map(|s| s.size_bytes).collect::<Vec<_>>());
+    eprintln!("R004 P6 réparation indexed {} incomplete {:?} leftovers {:?} ; nettoyage {notices:?}", rep.indexed, rep.incomplete, rep.leftovers);
+    assert_eq!(inv.stories.len(), 1);
+    assert_eq!(rep.indexed, 1);
+    assert!(rep.incomplete.is_empty());
+    assert_eq!(pi_short(&mount, ".pi"), vec!["89ABCDEF"]);
+    // Scan audio sur le même volume.
+    let audio = tempfile::tempdir().unwrap();
+    fs::write(audio.path().join("a.mp3"), b"mp3").unwrap();
+    let scan = crate::storybox_sync::scan_audio_folder(audio.path().to_str().unwrap()).unwrap();
+    let listed: Vec<_> = names(audio.path());
+    eprintln!("R004 P6 dossier audio brut = {listed:?} ; scan = {:?}", scan.iter().map(|f| &f.filename).collect::<Vec<_>>());
+    assert_eq!(scan.len(), 1);
+}
