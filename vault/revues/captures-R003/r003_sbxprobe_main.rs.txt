@@ -1,0 +1,73 @@
+//! Sonde R003 (doubleur) : fichiers source RÉELS du tip c751c53 inclus par #[path].
+#![allow(dead_code)]
+#[path = "/Users/malik/Documents/Synchro_boite_a_histoires/.claude/worktrees/F02-R003/mac-app-store/src-tauri/src/storybox_device.rs"]
+mod storybox_device;
+#[path = "/Users/malik/Documents/Synchro_boite_a_histoires/.claude/worktrees/F02-R003/mac-app-store/src-tauri/src/storybox_sync.rs"]
+mod storybox_sync;
+#[path = "/Users/malik/Documents/Synchro_boite_a_histoires/.claude/worktrees/F02-R003/mac-app-store/src-tauri/src/sandbox_access.rs"]
+mod sandbox_access;
+#[path = "/Users/malik/Documents/Synchro_boite_a_histoires/.claude/worktrees/F02-R003/mac-app-store/src-tauri/src/storybox_import.rs"]
+mod storybox_import;
+#[path = "/Users/malik/Documents/Synchro_boite_a_histoires/.claude/worktrees/F02-R003/mac-app-store/src-tauri/src/storybox_v3.rs"]
+mod storybox_v3;
+#[path = "/Users/malik/Documents/Synchro_boite_a_histoires/.claude/worktrees/F02-R003/mac-app-store/src-tauri/src/storybox_crypto.rs"]
+mod storybox_crypto;
+#[path = "/Users/malik/Documents/Synchro_boite_a_histoires/.claude/worktrees/F02-R003/mac-app-store/src-tauri/src/studio_story.rs"]
+mod studio_story;
+#[path = "/Users/malik/Documents/Synchro_boite_a_histoires/.claude/worktrees/F02-R003/mac-app-store/src-tauri/src/story_pack.rs"]
+mod story_pack;
+
+use std::fs;
+use std::path::Path;
+
+const VOL: &str = "/Volumes/SBXR003";
+
+fn state(acc: &sandbox_access::SandboxAccess) -> String {
+    format!("{:?}", acc.validated_device())
+}
+
+fn main() {
+    let mode = std::env::args().nth(1).unwrap_or_default();
+    let id_a = std::env::args().nth(2).unwrap_or_default();
+    let swap_cmd = std::env::args().nth(3).unwrap_or_default();
+    println!("HOME={}", std::env::var("HOME").unwrap_or_default());
+    let p = Path::new(VOL);
+    println!("== mode {mode}, {VOL}");
+    println!("  stat .md exists       = {}", p.join(".md").exists());
+    println!("  fs::read(.md)         = {:?}", fs::read(p.join(".md")).map(|d| d.len()).map_err(|e| e.to_string()));
+    let probe = storybox_device::probe_mount(p);
+    println!("  probe_mount           = state {:?}, deviceId {:?}", probe.state, probe.device_id);
+    println!("  read_device_id        = {:?}", storybox_device::read_device_id(p));
+
+    // Accès « validé » posé à la main pour la boîte A (état que laisse une validation antérieure).
+    let acc = sandbox_access::SandboxAccess::default();
+    acc.set_device(VOL.to_string(), Some(id_a.clone()), None);
+    println!("  set_device(A)         → validated = {}", state(&acc));
+    println!("  require_mount(A)      = {:?}", acc.require_mount(VOL, &id_a));
+    println!("  require_mount(autre)  = {:?}", acc.require_mount(VOL, "serial-0000000000000000"));
+    println!("  require_mount(/Volumes/X, A) = {:?}", acc.require_mount("/Volumes/X", &id_a));
+
+    // Écriture par le vrai install_story, sans accès : doit échouer avant toute écriture.
+    let r = storybox_import::install_story(VOL, "89ABCDEF", "r003", "h", &|_| {}, |dir| {
+        fs::write(dir.join("ni"), b"x").map_err(|e| e.to_string())
+    });
+    println!("  install_story         = {:?}", r.map(|x| x.short_uuid));
+    println!("  repair_pack_index     = {:?}", storybox_device::repair_pack_index_native(VOL).map(|x| x.indexed));
+
+    if mode == "swap" && !swap_cmd.is_empty() {
+        println!("== échange de boîte au même point de montage : {swap_cmd}");
+        let st = std::process::Command::new("/bin/sh").arg("-c").arg(&swap_cmd).status();
+        println!("  swap status           = {:?}", st.map(|s| s.code()));
+        println!("  read_device_id        = {:?}", storybox_device::read_device_id(p));
+        println!("  require_mount(A)      = {:?}", acc.require_mount(VOL, &id_a));
+        println!("  validated avant reprobe = {}", state(&acc));
+        println!("  reprobe_validated     = {:?}", acc.reprobe_validated().map(|pr| pr.device_id));
+        println!("  validated après reprobe = {}", state(&acc));
+    } else {
+        println!("  reprobe_validated     = {:?}", acc.reprobe_validated().map(|pr| pr.device_id));
+        println!("  validated après reprobe = {}", state(&acc));
+    }
+    acc.release_all();
+    acc.release_all();
+    println!("== release_all x2 : validated = {} (pas de panique)", state(&acc));
+}

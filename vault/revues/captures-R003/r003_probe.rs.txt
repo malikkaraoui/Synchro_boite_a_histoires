@@ -1,0 +1,356 @@
+//! Sonde R003 (doubleur) — tests TEMPORAIRES, jamais committés.
+//! Branchée par une seule ligne `#[cfg(test)] #[path = …] mod r003_probe;` ajoutée puis retirée de main.rs.
+//! Tout passe par le vrai code du tip : `import_story`, `install_story`, `repair_pack_index_native`.
+#![allow(dead_code)]
+
+use crate::storybox_device;
+use crate::storybox_import::{import_story, install_story};
+use crate::storybox_v3::test_fixtures::{md_v5, md_v7, sha256_hex};
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+const UUID_S: &str = "12345678-9abc-4def-8123-456789abcdef"; // → 89ABCDEF
+const UUID_T: &str = "12345678-9abc-4def-8123-4567cafe0001"; // → CAFE0001
+
+fn story_json(uuid: &str) -> String {
+    format!(
+        r#"{{"format": "v1", "version": 1, "title": "R003", "description": "", "nightModeAvailable": false, "factoryPack": false, "stageNodes": [{{"uuid": "{uuid}", "squareOne": true, "audio": "histoire.mp3", "image": "image001.bmp", "controlSettings": {{"wheel": false, "ok": false, "home": true, "pause": true, "autoplay": true}}, "okTransition": null, "homeTransition": null}}], "actionNodes": [], "listNodes": []}}"#
+    )
+}
+
+fn pattern(len: usize, a: usize, b: usize) -> Vec<u8> {
+    (0..len).map(|i| ((i * a + b) & 0xFF) as u8).collect()
+}
+
+fn write_pack(dir: &Path, name: &str, uuid: &str, audio: &[u8], image: bool) -> PathBuf {
+    let zip_path = dir.join(name);
+    let mut w = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+    let o = zip::write::SimpleFileOptions::default();
+    w.start_file("story.json", o).unwrap();
+    w.write_all(story_json(uuid).as_bytes()).unwrap();
+    w.start_file("assets/histoire.mp3", o).unwrap();
+    w.write_all(audio).unwrap();
+    if image {
+        w.start_file("assets/image001.bmp", o).unwrap();
+        w.write_all(&pattern(700, 19, 29)).unwrap();
+    }
+    w.finish().unwrap();
+    zip_path
+}
+
+/// Montage simulé DANS `std::env::temp_dir()` : `TMPDIR` pointe sur une image FAT32 pour le rejeu FAT.
+fn new_mount(md: &[u8]) -> (tempfile::TempDir, PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let mount = root.path().join("BOX");
+    fs::create_dir_all(mount.join(".content")).unwrap();
+    fs::write(mount.join(".md"), md).unwrap();
+    (root, mount)
+}
+
+fn packs_dir() -> tempfile::TempDir {
+    // Les packs sont hors montage (APFS) comme dans l'app.
+    tempfile::Builder::new().tempdir_in("/private/tmp").unwrap()
+}
+
+fn import(mount: &Path, zip: &Path) -> Result<String, String> {
+    import_story(mount.to_str().unwrap(), zip, "r003", "sha256:r003", &|_| {}).map(|r| r.short_uuid)
+}
+
+fn snapshot(root: &Path) -> BTreeMap<String, (usize, String)> {
+    fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, (usize, String)>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+            if path.is_dir() {
+                out.insert(format!("{rel}/"), (0, "dir".into()));
+                walk(root, &path, out);
+            } else {
+                let data = fs::read(&path).unwrap();
+                out.insert(rel, (data.len(), sha256_hex(&data)));
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(root, root, &mut out);
+    out
+}
+
+fn diff(a: &BTreeMap<String, (usize, String)>, b: &BTreeMap<String, (usize, String)>) -> Vec<String> {
+    let mut d = vec![];
+    for (k, v) in a {
+        match b.get(k) {
+            None => d.push(format!("- {k}")),
+            Some(w) if w != v => d.push(format!("~ {k}")),
+            _ => {}
+        }
+    }
+    for k in b.keys() {
+        if !a.contains_key(k) {
+            d.push(format!("+ {k}"));
+        }
+    }
+    d
+}
+
+fn pi_short(mount: &Path) -> Vec<String> {
+    fs::read(mount.join(".pi"))
+        .unwrap_or_default()
+        .chunks(16)
+        .map(|c| hex::encode(c).to_uppercase())
+        .collect()
+}
+
+fn is_fat() -> bool {
+    std::env::var("R003_FAT").is_ok()
+}
+
+#[cfg(unix)]
+fn chmod(p: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(p, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// Écrit une histoire complète minimale dans `dir` (ce que produit `write_story_files`, en forme).
+fn write_complete(dir: &Path, audio: &[u8]) -> Result<(), String> {
+    for f in ["ni", "li", "ri", "si", "bt"] {
+        fs::write(dir.join(f), f.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    fs::write(dir.join("sf/000/HISTOIRE"), audio).map_err(|e| e.to_string())
+}
+
+// ── A1 : `rename(<S>, .<S>.old)` refusé ──────────────────────────────────────
+#[cfg(unix)]
+#[test]
+fn r003_a1_rename_aside_refused() {
+    if is_fat() {
+        eprintln!("R003 A1 : FAT ignore chmod, non significatif");
+        return;
+    }
+    let (_root, mount) = new_mount(&md_v5());
+    let packs = packs_dir();
+    let good = write_pack(packs.path(), "s.zip", UUID_S, &pattern(3000, 31, 17), true);
+    import(&mount, &good).unwrap();
+    let before = snapshot(&mount);
+    let content = mount.join(".content");
+    let res = install_story(mount.to_str().unwrap(), "89ABCDEF", "r003", "h", &|_| {}, |dir| {
+        write_complete(dir, b"nouvelle")?;
+        chmod(&content, 0o555); // ni renommage ni suppression d'entrée dans .content
+        Ok(())
+    });
+    chmod(&content, 0o755);
+    let err = res.unwrap_err();
+    let after = snapshot(&mount);
+    eprintln!("R003 A1 err = {err}");
+    eprintln!("R003 A1 diff = {:?}", diff(&before, &after));
+    assert!(err.contains("Mise de côté"), "{err}");
+    // Seul le transit peut rester (sa suppression a échoué et est signalée) ; <S> et .pi intacts.
+    for d in diff(&before, &after) {
+        assert!(d.contains(".89ABCDEF.tmp"), "écart hors transit : {d}");
+    }
+    // Import suivant : le transit orphelin est nettoyé, la boîte revient à l'identique + T.
+    let t = write_pack(packs.path(), "t.zip", UUID_T, &pattern(900, 5, 1), true);
+    assert_eq!(import(&mount, &t).unwrap(), "CAFE0001");
+    assert!(!content.join(".89ABCDEF.tmp").exists());
+    let s_before: Vec<_> = before.iter().filter(|(k, _)| k.contains("89ABCDEF/")).collect();
+    let s_after = snapshot(&mount);
+    for (k, v) in s_before {
+        if k.ends_with(".la-forge-a-histoires.json") { continue; }
+        assert_eq!(s_after.get(k), Some(v), "{k}");
+    }
+}
+
+// ── A2 : double échec (index KO + retrait de la nouvelle KO) puis import d'une autre histoire ──
+#[cfg(unix)]
+#[test]
+fn r003_a2_double_failure_then_other_import() {
+    if is_fat() {
+        eprintln!("R003 A2 : FAT ignore chmod, non significatif");
+        return;
+    }
+    let (_root, mount) = new_mount(&md_v5());
+    let packs = packs_dir();
+    let old_audio = pattern(3000, 31, 17);
+    let good = write_pack(packs.path(), "s.zip", UUID_S, &old_audio, true);
+    import(&mount, &good).unwrap();
+    let old_s = snapshot(&mount.join(".content/89ABCDEF"));
+    // 1er échec : .pi.hidden en dossier → l'index échoue APRÈS le remplacement.
+    fs::remove_file(mount.join(".pi.hidden")).unwrap();
+    fs::create_dir_all(mount.join(".pi.hidden")).unwrap();
+    let content = mount.join(".content");
+    let res = install_story(mount.to_str().unwrap(), "89ABCDEF", "r003", "h", &|_| {}, |dir| {
+        write_complete(dir, b"nouvelle")?;
+        // 2e échec : sf/000 non modifiable → le retrait de la nouvelle histoire échoue à moitié.
+        chmod(&dir.join("sf/000"), 0o555);
+        Ok(())
+    });
+    let err = res.unwrap_err();
+    eprintln!("R003 A2 err = {err}");
+    let names: Vec<_> = fs::read_dir(&content).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    eprintln!("R003 A2 .content après échec = {names:?}");
+    eprintln!("R003 A2 <S> après échec = {:?}", snapshot(&content.join("89ABCDEF")).keys().collect::<Vec<_>>());
+    assert!(content.join(".89ABCDEF.old").is_dir(), "l'ancienne est encore là, en .old");
+    // L'erreur transitoire disparaît (droits remis, .pi.hidden réparé), l'utilisateur importe AUTRE CHOSE.
+    chmod(&content.join("89ABCDEF/sf/000"), 0o755);
+    fs::remove_dir_all(mount.join(".pi.hidden")).unwrap();
+    let t = write_pack(packs.path(), "t.zip", UUID_T, &pattern(900, 5, 1), true);
+    let log = std::cell::RefCell::new(vec![]);
+    let r = import_story(mount.to_str().unwrap(), &t, "r003", "h", &|m| log.borrow_mut().push(m.to_string()));
+    eprintln!("R003 A2 import T = {:?} ; journal = {:?}", r.as_ref().map(|x| x.short_uuid.clone()), log.borrow());
+    let old_still_somewhere = content.join(".89ABCDEF.old").exists()
+        || snapshot(&content.join("89ABCDEF")) == old_s;
+    eprintln!("R003 A2 ancienne histoire encore présente quelque part = {old_still_somewhere}");
+    eprintln!("R003 A2 .pi = {:?}", pi_short(&mount));
+    eprintln!("R003 A2 <S> final = {:?}", snapshot(&content.join("89ABCDEF")).keys().collect::<Vec<_>>());
+}
+
+// ── A3 : « Réparer l'index » après une coupure entre les deux renommages ─────
+#[test]
+fn r003_a3_repair_after_interrupted_rename() {
+    let (_root, mount) = new_mount(&md_v5());
+    let packs = packs_dir();
+    let s = write_pack(packs.path(), "s.zip", UUID_S, &pattern(3000, 31, 17), true);
+    let t = write_pack(packs.path(), "t.zip", UUID_T, &pattern(900, 5, 1), true);
+    import(&mount, &t).unwrap();
+    import(&mount, &s).unwrap();
+    eprintln!("R003 A3 .pi avant = {:?}", pi_short(&mount));
+    let content = mount.join(".content");
+    // État laissé par un débranchement entre `<S> → .<S>.old` et `.<S>.tmp → <S>` (transit déjà perdu).
+    fs::rename(content.join("89ABCDEF"), content.join(".89ABCDEF.old")).unwrap();
+    let report = storybox_device::repair_pack_index_native(mount.to_str().unwrap()).unwrap();
+    eprintln!("R003 A3 réparation = indexed {} incomplete {:?}", report.indexed, report.incomplete);
+    eprintln!("R003 A3 .pi après réparation = {:?}", pi_short(&mount));
+    eprintln!("R003 A3 .old encore là = {}, <S> = {}", content.join(".89ABCDEF.old").is_dir(), content.join("89ABCDEF").is_dir());
+    let s_indexed_after_repair = pi_short(&mount).iter().any(|e| e.ends_with("89ABCDEF"));
+    // Import suivant : .old restauré et réindexé.
+    let u = write_pack(packs.path(), "u.zip", "12345678-9abc-4def-8123-4567cafe0002", &pattern(500, 3, 2), true);
+    import(&mount, &u).unwrap();
+    eprintln!("R003 A3 .pi après import suivant = {:?}", pi_short(&mount));
+    assert!(!s_indexed_after_repair, "constat : la réparation sort <S> de .pi sans restaurer .old");
+    assert!(content.join("89ABCDEF/bt").is_file());
+}
+
+// ── A4 : fichiers au nom de transit pour l'histoire importée ────────────────
+#[test]
+fn r003_a4_files_named_like_transit_for_same_story() {
+    for name in [".89ABCDEF.tmp", ".89ABCDEF.old"] {
+        let (_root, mount) = new_mount(&md_v7());
+        let packs = packs_dir();
+        let s = write_pack(packs.path(), "s.zip", UUID_S, &pattern(3000, 31, 17), true);
+        import(&mount, &s).unwrap();
+        fs::write(mount.join(".content").join(name), b"piege").unwrap();
+        let before = snapshot(&mount);
+        let s2 = write_pack(packs.path(), "s2.zip", UUID_S, &pattern(3000, 7, 3), true);
+        let err = import(&mount, &s2).unwrap_err();
+        let after = snapshot(&mount);
+        eprintln!("R003 A4 [{name}] err = {err}");
+        eprintln!("R003 A4 [{name}] diff = {:?}", diff(&before, &after));
+        assert_eq!(before, after, "[{name}] boîte identique");
+    }
+}
+
+// ── A5 : .old ET <S> présents, réimport qui échoue ──────────────────────────
+#[test]
+fn r003_a5_old_and_live_present_then_failed_reimport() {
+    let (_root, mount) = new_mount(&md_v7());
+    let packs = packs_dir();
+    let s = write_pack(packs.path(), "s.zip", UUID_S, &pattern(3000, 31, 17), true);
+    import(&mount, &s).unwrap();
+    let content = mount.join(".content");
+    fs::create_dir_all(content.join(".89ABCDEF.old/sf/000")).unwrap();
+    write_complete(&content.join(".89ABCDEF.old"), b"version encore plus ancienne").unwrap();
+    let before = snapshot(&mount);
+    let broken = write_pack(packs.path(), "b.zip", UUID_S, &pattern(3000, 7, 3), false);
+    let err = import(&mount, &broken).unwrap_err();
+    let d = diff(&before, &snapshot(&mount));
+    eprintln!("R003 A5 err = {err}\nR003 A5 diff = {d:?}");
+    assert!(d.iter().all(|l| l.starts_with("- .content/.89ABCDEF.old")), "seul le .old (présumé abouti) est retiré");
+}
+
+// ── C : une histoire officielle déjà indexée à laquelle manque un fichier ───
+#[test]
+fn r003_c_official_missing_bt_leaves_pi() {
+    for missing in ["bt", "ni"] {
+        let (_root, mount) = new_mount(&md_v5());
+        let official = mount.join(".content/AABBCCDD");
+        fs::create_dir_all(official.join("sf/000")).unwrap();
+        for f in ["ni", "li", "ri", "si", "bt"] {
+            if f != missing {
+                fs::write(official.join(f), f.as_bytes()).unwrap();
+            }
+        }
+        let full = hex::decode("11223344556677889900aabbaabbccdd").unwrap();
+        fs::write(mount.join(".pi"), &full).unwrap();
+        let packs = packs_dir();
+        let s = write_pack(packs.path(), "s.zip", UUID_S, &pattern(900, 5, 1), true);
+        let log = std::cell::RefCell::new(vec![]);
+        import_story(mount.to_str().unwrap(), &s, "r003", "h", &|m| log.borrow_mut().push(m.to_string())).unwrap();
+        eprintln!("R003 C [{missing} manquant] .pi avant = [11223344556677889900AABBAABBCCDD] après = {:?}", pi_short(&mount));
+        eprintln!("R003 C [{missing} manquant] journal : {:?}", log.borrow().iter().filter(|l| l.contains("incomplet")).collect::<Vec<_>>());
+        assert!(!pi_short(&mount).iter().any(|e| e.ends_with("AABBCCDD")), "constat : l'officielle sort de .pi");
+        assert!(official.is_dir());
+    }
+}
+
+// ── A6 : disque plein pendant un réimport (FAT uniquement : on remplit le volume) ──
+#[test]
+fn r003_a6_disk_full_reimport() {
+    if !is_fat() {
+        eprintln!("R003 A6 : ignoré hors image FAT");
+        return;
+    }
+    let (root, mount) = new_mount(&md_v5());
+    let packs = packs_dir();
+    let s = write_pack(packs.path(), "s.zip", UUID_S, &pattern(200_000, 31, 17), true);
+    import(&mount, &s).unwrap();
+    // Remplissage du volume (hors .content) jusqu'à ENOSPC.
+    let filler = root.path().join("filler");
+    fs::create_dir_all(&filler).unwrap();
+    let mb = vec![0x5Au8; 1 << 20];
+    let kb = vec![0x5Au8; 4096];
+    let mut n = 0;
+    while fs::write(filler.join(format!("m{n}")), &mb).is_ok() { n += 1; }
+    let mut k = 0;
+    while fs::write(filler.join(format!("k{k}")), &kb).is_ok() { k += 1; }
+    eprintln!("R003 A6 remplissage : {n} Mo + {k} × 4 Ko");
+    let before = snapshot(&mount);
+    let s2 = write_pack(packs.path(), "s2.zip", UUID_S, &pattern(200_000, 7, 3), true);
+    let err = import(&mount, &s2).unwrap_err();
+    let after = snapshot(&mount);
+    eprintln!("R003 A6 err = {err}\nR003 A6 diff = {:?}", diff(&before, &after));
+    assert_eq!(before, after, "disque plein : boîte identique");
+    // Libère de la place : le réimport passe.
+    fs::remove_dir_all(&filler).unwrap();
+    assert_eq!(import(&mount, &s2).unwrap(), "89ABCDEF");
+}
+
+// ── FAT : casse des noms (dossier existant en minuscules) ───────────────────
+#[test]
+fn r003_fat_case_of_existing_dir() {
+    let (_root, mount) = new_mount(&md_v5());
+    let packs = packs_dir();
+    let content = mount.join(".content");
+    fs::create_dir_all(content.join("89abcdef/sf/000")).unwrap();
+    write_complete(&content.join("89abcdef"), b"minuscules").unwrap();
+    let s = write_pack(packs.path(), "s.zip", UUID_S, &pattern(900, 5, 1), true);
+    import(&mount, &s).unwrap();
+    let names: Vec<_> = fs::read_dir(&content).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    eprintln!("R003 FAT-casse (fat={}) .content = {names:?} ; .pi = {:?}", is_fat(), pi_short(&mount));
+}
+
+// ── FAT : ce qui reste dans .content après import + réimport réussis ────────
+#[test]
+fn r003_fat_listing_after_reimport() {
+    let (_root, mount) = new_mount(&md_v7());
+    let packs = packs_dir();
+    let s = write_pack(packs.path(), "s.zip", UUID_S, &pattern(900, 5, 1), true);
+    import(&mount, &s).unwrap();
+    let s2 = write_pack(packs.path(), "s2.zip", UUID_S, &pattern(900, 7, 3), true);
+    import(&mount, &s2).unwrap();
+    let mut names: Vec<_> = fs::read_dir(mount.join(".content")).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    let inv = storybox_device::read_inventory(&mount).unwrap();
+    eprintln!("R003 FAT-listing (fat={}) .content = {names:?} ; inventaire = {:?} ; .pi = {:?}", is_fat(), inv.stories.iter().map(|s| s.short_uuid.clone()).collect::<Vec<_>>(), pi_short(&mount));
+    assert!(names.iter().all(|n| !n.ends_with(".tmp") && !n.ends_with(".old")), "{names:?}");
+}
