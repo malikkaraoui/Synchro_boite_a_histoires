@@ -251,11 +251,14 @@ fn staging_dir_name(short_uuid: &str, suffix: &str) -> String {
 /// - `.<SHORT>.old` avec `<SHORT>` présent : remplacement abouti → supprimée ;
 /// - `.<SHORT>.old` sans `<SHORT>` : interruption entre les deux renommages → restaurée.
 ///
-/// Seuls les noms de cette forme exacte (8 hex) sont touchés.
+/// Seuls les dossiers de cette forme exacte (8 hex) sont touchés : c'est ce que crée l'import.
 pub(crate) fn clean_import_leftovers(content_dir: &Path) -> Result<(), String> {
     let entries = fs::read_dir(content_dir)
         .map_err(|e| format!("Lecture de .content/ échouée : {e}"))?;
     for entry in entries.filter_map(Result::ok) {
+        if !entry.path().is_dir() {
+            continue;
+        }
         let name = entry.file_name().to_string_lossy().into_owned();
         let Some(rest) = name.strip_prefix('.') else { continue };
         let (short_uuid, previous) = if let Some(s) = rest.strip_suffix(STAGING_SUFFIX) {
@@ -790,8 +793,9 @@ mod tests {
         // Interruption entre les deux renommages : seule la copie `.old` existe
         fs::create_dir_all(content.join(".55667788.old")).unwrap();
         fs::write(content.join(".55667788.old/ni"), b"seule copie").unwrap();
-        // Dossier caché étranger : jamais touché
+        // Dossier caché étranger, et fichier au nom de transit : jamais touchés
         fs::create_dir_all(content.join(".Spotlight-V100")).unwrap();
+        fs::write(content.join(".CAFEBABE.tmp"), b"fichier").unwrap();
 
         import(mount.path(), &zip_path).unwrap();
 
@@ -801,6 +805,7 @@ mod tests {
         assert!(!content.join(".55667788.old").exists());
         assert_eq!(fs::read(content.join("55667788/ni")).unwrap(), b"seule copie");
         assert!(content.join(".Spotlight-V100").is_dir());
+        assert!(content.join(".CAFEBABE.tmp").is_file());
         assert!(content.join("89ABCDEF/bt").is_file());
     }
 
