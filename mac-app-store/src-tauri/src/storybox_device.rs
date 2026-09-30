@@ -438,18 +438,48 @@ pub(crate) fn is_complete_story_dir(story_dir: &Path) -> bool {
         && (!story_dir.join(SIDECAR_FILE).exists() || story_dir.join("bt").is_file())
 }
 
-/// Entrées d'un index pour la réparation : absent ou de taille invalide → vide (reconstruit
-/// depuis les dossiers) ; illisible → erreur, pour ne rien retirer sur une lecture ratée.
-fn read_pack_index_for_repair(index_path: &Path) -> Result<Vec<[u8; 16]>, String> {
+/// Entrées d'un index pour la réparation, et signalement éventuel :
+/// - absent → vide (reconstruit depuis les dossiers) ;
+/// - taille non multiple de 16 (écriture coupée) → les entrées entières du début, dans leur
+///   ordre ; une entrée sans dossier est retirée ensuite, comme pour tout index abîmé (R004 P5b) ;
+/// - illisible → erreur, pour ne rien retirer sur une lecture ratée : l'import échoue fermé, et
+///   le message nomme la sortie (« Réparer l'index », qui met l'index de côté d'abord).
+fn read_pack_index_for_repair(index_path: &Path) -> Result<(Vec<[u8; 16]>, Option<String>), String> {
+    let name = index_path.file_name().unwrap_or_default().to_string_lossy();
     let data = match fs::read(index_path) {
         Ok(data) => data,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("Lecture {:?} échouée : {e}. Index non modifié.", index_path)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), None)),
+        Err(e) => return Err(format!(
+            "L'index de la boîte est illisible ({name} : {e}). Utilisez « Réparer l'index » pour le reconstruire \
+             (l'ancien sera gardé en {name}.bak). Index non modifié."
+        )),
     };
-    if data.len() % 16 != 0 {
-        return Ok(Vec::new());
+    let entries: Vec<[u8; 16]> = data.chunks_exact(16).map(|c| c.try_into().unwrap()).collect();
+    let notice = (data.len() % 16 != 0).then(|| format!(
+        "L'index {name} était tronqué : {} entrée(s) entière(s) gardée(s) dans leur ordre, le reste est reconstruit à partir des histoires présentes",
+        entries.len()
+    ));
+    Ok((entries, notice))
+}
+
+/// « Réparer l'index » seulement (jamais pendant un import) : un index illisible (erreur
+/// d'E/S, dossier à sa place) est renommé en `<nom>.bak`, puis la réparation le reconstruit à
+/// partir des dossiers. Renvoie les signalements pour le journal.
+pub(crate) fn set_aside_unreadable_pack_indexes(mount: &Path) -> Result<Vec<String>, String> {
+    let mut notices = Vec::new();
+    for name in [".pi", ".pi.hidden"] {
+        let path = mount.join(name);
+        let Err(e) = fs::read(&path) else { continue };
+        if e.kind() == std::io::ErrorKind::NotFound {
+            continue;
+        }
+        fs::rename(&path, mount.join(format!("{name}.bak")))
+            .map_err(|r| format!("Mise de côté de l'index illisible {name} échouée : {r}. Index non modifié."))?;
+        notices.push(format!(
+            "L'index {name} était illisible ({e}) : gardé en {name}.bak, puis reconstruit à partir des histoires présentes (ordre d'origine perdu)"
+        ));
     }
-    read_pack_index_entries(index_path)
+    Ok(notices)
 }
 
 /// Résultat de la réparation de `.pi`.
@@ -463,6 +493,8 @@ pub struct PackIndexRepair {
     pub incomplete: Vec<String>,
     /// Restes d'un import interrompu traités ou laissés avant la réparation (signalements).
     pub leftovers: Vec<String>,
+    /// Index tronqué ou illisible mis de côté : signalements pour le journal.
+    pub notices: Vec<String>,
 }
 
 /// Répare `.pi` et `.pi.hidden` avec le critère de la référence (`recover_stories`) :
@@ -491,8 +523,8 @@ pub fn repair_pack_index_native(mount: &str) -> Result<PackIndexRepair, String> 
     };
     let exists = |short_uuid: &String| visible_dirs.contains_key(short_uuid) || hidden_dirs.contains_key(short_uuid);
 
-    let visible_entries = read_pack_index_for_repair(&mount_path.join(".pi"))?;
-    let hidden_entries = read_pack_index_for_repair(&mount_path.join(".pi.hidden"))?;
+    let (visible_entries, visible_notice) = read_pack_index_for_repair(&mount_path.join(".pi"))?;
+    let (hidden_entries, hidden_notice) = read_pack_index_for_repair(&mount_path.join(".pi.hidden"))?;
 
     // Entrées gardées, dans leur ordre ; une entrée à la fois dans les deux index reste cachée.
     let mut indexed: HashSet<String> = HashSet::new();
@@ -539,6 +571,7 @@ pub fn repair_pack_index_native(mount: &str) -> Result<PackIndexRepair, String> 
         indexed: visible_uuid_entries.len() + hidden_uuid_entries.len(),
         incomplete,
         leftovers: Vec::new(),
+        notices: visible_notice.into_iter().chain(hidden_notice).collect(),
     })
 }
 
@@ -1486,27 +1519,49 @@ mod tests {
         assert_eq!(report.incomplete, vec!["55667788"]);
     }
 
-    #[cfg(unix)]
+    /// Index illisible (ici un dossier à la place de `.pi` : échec de lecture sur tout volume,
+    /// FAT compris, qui ignore `chmod`) : la réparation interne échoue fermé, sans rien écrire,
+    /// et le message nomme la sortie.
     #[test]
     fn repair_pack_index_fails_closed_on_unreadable_index() {
-        use std::os::unix::fs::PermissionsExt;
         let root = TempDir::new("storybox-repair-unreadable");
         let mount = root.path().join("STORYBOX");
         make_complete_story(&mount.join(".content").join("AABBCCDD"));
         fs::create_dir_all(mount.join(".content").join("11223344")).unwrap();
-        let pi = mount.join(".pi");
-        write_pack_index_entries(&pi, &["11223344", "AABBCCDD"].map(short_entry)).unwrap();
-        // Écriture seule : illisible, mais une réécriture passerait.
-        fs::set_permissions(&pi, fs::Permissions::from_mode(0o200)).unwrap();
-        if fs::read(&pi).is_ok() {
-            eprintln!("droits ignorés ici : test sauté");
-            return;
+        fs::create_dir_all(mount.join(".pi")).unwrap();
+        let hidden = mount.join(".pi.hidden");
+        write_pack_index_entries(&hidden, &["11223344"].map(short_entry)).unwrap();
+
+        let err = repair_pack_index_native(&mount.to_string_lossy()).unwrap_err();
+        assert!(err.starts_with("L'index de la boîte est illisible (.pi :"), "{err}");
+        assert!(err.contains("Utilisez « Réparer l'index » pour le reconstruire"), "{err}");
+        assert!(err.ends_with("Index non modifié."), "{err}");
+        assert!(mount.join(".pi").is_dir());
+        assert_eq!(index_order(&hidden), vec!["11223344"], "entrée incomplète non retirée");
+    }
+
+    /// R004 P5b : `.pi` tronqué (écriture coupée) → les entrées entières gardent leur ordre, même
+    /// incomplètes ; seuls les octets en trop sont perdus, et c'est signalé.
+    #[test]
+    fn repair_pack_index_keeps_whole_entries_of_truncated_index() {
+        let root = TempDir::new("storybox-repair-truncated");
+        let mount = root.path().join("STORYBOX");
+        let content = mount.join(".content");
+        for short in ["55667788", "11223344", "99AABBCC"] {
+            make_complete_story(&content.join(short));
         }
-        let res = repair_pack_index_native(&mount.to_string_lossy());
-        fs::set_permissions(&pi, fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(res.is_err(), "index illisible : la réparation doit échouer sans écrire ({res:?})");
-        assert!(res.unwrap_err().contains("Index non modifié"));
-        assert_eq!(index_order(&pi), vec!["11223344", "AABBCCDD"], "entrée incomplète non retirée");
+        fs::create_dir_all(content.join("AABBCCDD")).unwrap();
+        let pi = mount.join(".pi");
+        write_pack_index_entries(&pi, &["55667788", "AABBCCDD", "11223344"].map(short_entry)).unwrap();
+        let mut data = fs::read(&pi).unwrap();
+        data.extend_from_slice(&[1, 2, 3]);
+        fs::write(&pi, &data).unwrap();
+
+        let report = repair_pack_index_native(&mount.to_string_lossy()).unwrap();
+        assert_eq!(index_order(&pi), vec!["55667788", "AABBCCDD", "11223344", "99AABBCC"]);
+        assert_eq!(report.incomplete, vec!["AABBCCDD"]);
+        assert_eq!(report.notices.len(), 1, "{:?}", report.notices);
+        assert!(report.notices[0].contains(".pi était tronqué : 3 entrée(s)"), "{:?}", report.notices);
     }
 
     /// R003 : sur FAT, macOS pose `._<nom>` à côté de chaque fichier et dossier écrit.

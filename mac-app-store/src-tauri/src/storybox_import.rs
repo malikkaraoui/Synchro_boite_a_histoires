@@ -317,7 +317,8 @@ pub(crate) fn clean_import_leftovers(content_dir: &Path) -> Result<Vec<String>, 
 
 /// « Réparer l'index » : termine d'abord un import interrompu (même nettoyage qu'avant un
 /// import), puis reconstruit l'index. Sans ce nettoyage, une histoire restée en `.<SHORT>.old`
-/// sortirait de `.pi` sans être signalée.
+/// sortirait de `.pi` sans être signalée. Un index illisible est mis de côté en `.bak` puis
+/// reconstruit : c'est la sortie que nomme l'erreur d'import, qui, elle, échoue fermé.
 pub fn repair_pack_index(mount: &str) -> Result<storybox_device::PackIndexRepair, String> {
     let content_dir = Path::new(mount).join(".content");
     let leftovers = if content_dir.is_dir() {
@@ -326,8 +327,10 @@ pub fn repair_pack_index(mount: &str) -> Result<storybox_device::PackIndexRepair
     } else {
         Vec::new()
     };
+    let set_aside = storybox_device::set_aside_unreadable_pack_indexes(Path::new(mount))?;
     let mut report = storybox_device::repair_pack_index_native(mount)?;
     report.leftovers = leftovers;
+    report.notices.splice(0..0, set_aside);
     Ok(report)
 }
 
@@ -386,6 +389,9 @@ pub(crate) fn install_story(
     let pack_index = storybox_device::PackIndexSnapshot::take(Path::new(mount));
     match storybox_device::repair_pack_index_native(mount) {
         Ok(report) => {
+            for notice in &report.notices {
+                on_progress(&format!("⚠ {notice}"));
+            }
             if !report.incomplete.is_empty() {
                 on_progress(&format!(
                     "⚠ Dossier(s) incomplet(s), laissé(s) sur la boîte (gardé(s) dans l'index s'il(s) y étai(en)t, jamais ajouté(s)) : {}",
@@ -1030,6 +1036,33 @@ mod tests {
         assert_eq!(&fs::read(live.join("sf/000/HISTOIRE")).unwrap()[512..], &new_audio[512..]);
         assert!(hidden_content_entries(mount.path()).is_empty(), "ni .old ni .tmp");
         assert_eq!(fs::read(mount.path().join(".pi")).unwrap(), pi_before);
+    }
+
+    /// R004 R4-3 : `.pi` illisible (un dossier à sa place, sur tout volume). L'import échoue
+    /// fermé, boîte identique, et le message nomme la sortie ; « Réparer l'index » met l'index de
+    /// côté en `.pi.bak`, le reconstruit, le signale ; l'import passe ensuite.
+    #[test]
+    fn unreadable_index_blocks_import_until_repair_sets_it_aside() {
+        let (mount, packs) = mount_with_imported_story(&md_v5());
+        let pi = mount.path().join(".pi");
+        fs::remove_file(&pi).unwrap();
+        fs::create_dir_all(pi.join("illisible")).unwrap();
+        let before = snapshot(mount.path());
+
+        let other = write_pack_json(packs.path(), "other.zip", &other_story_json(), &pattern(900, 5, 1), true);
+        let err = import(mount.path(), &other).unwrap_err();
+        assert!(err.contains("L'index de la boîte est illisible"), "{err}");
+        assert!(err.contains("Utilisez « Réparer l'index » pour le reconstruire"), "{err}");
+        assert_eq!(snapshot(mount.path()), before, "import fail-closed : boîte identique");
+
+        let report = repair_pack_index(mount.path().to_str().unwrap()).unwrap();
+        assert!(mount.path().join(".pi.bak/illisible").is_dir(), "ancien index gardé");
+        assert_eq!(report.notices.len(), 1, "{:?}", report.notices);
+        assert!(report.notices[0].contains("gardé en .pi.bak"), "{:?}", report.notices);
+        assert_eq!(pi_short_uuids(mount.path()), vec!["89ABCDEF", "AABBCCDD"], "reconstruit depuis .content/");
+
+        import(mount.path(), &other).unwrap();
+        assert!(pi_short_uuids(mount.path()).contains(&"CAFE0001".to_string()));
     }
 
     /// R003 A3 : coupure entre `<S>` → `.old` et `.tmp` → `<S>`, puis « Réparer l'index » (le

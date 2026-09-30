@@ -1270,6 +1270,9 @@ $repairBtn.addEventListener("click", async () => {
     for (const notice of report.leftovers ?? []) {
       log("err", `Import interrompu : ${notice}`);
     }
+    for (const notice of report.notices ?? []) {
+      log("err", notice);
+    }
     log("ok", isMacAppStoreChannel()
       ? `Index réparé nativement (${report.indexed} histoire(s)) — redémarre la boîte à histoires pour voir les histoires.`
       : `Index réparé (${report.indexed} histoire(s)) — redémarre la boîte à histoires pour voir les histoires.`);
