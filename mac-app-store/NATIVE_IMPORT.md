@@ -20,6 +20,12 @@
 > d'index (aligné sur la référence, tableau ajouter/garder/retirer), `.content.hidden/`, les
 > fichiers AppleDouble `._*` et les diagnostics de bookmark (§ 3). Tests : 95.
 
+> **Mise à jour 2026-09-30 (M0008, réserves R4-1 à R4-3 du doublage R004).** Le retour
+> arrière passe par renommage, plus jamais par suppression en place : l'affirmation de M0007
+> « ferme R3-1 » était **fausse sur FAT** (rectifiée ci-dessous). Ajoutés : le verrou
+> d'exclusion des écritures, la sortie nommée pour un index illisible, et la lecture d'un
+> index tronqué. Tests : 99, sur APFS **et** sur FAT32 ; aucun test sauté.
+
 ---
 
 ## Contexte
@@ -89,7 +95,8 @@ ZIP → story.json → StudioStory
        → sidecar (.la-forge-a-histoires.json) dans le dossier de transit
        → <S> → .<S>.old (si réimport), puis .<S>.tmp → <S>
        → repair_pack_index_native(mount)
-       → suppression de .<S>.old
+       → succès : .<S>.old → .<S>.tmp, puis suppression de .<S>.tmp
+       → échec : <S> → .<S>.tmp, .<S>.old → <S>, puis suppression de .<S>.tmp
 ```
 
 **Réimport atomique (M0006, réserve R-b de R002)** : l'ancienne histoire n'est remplacée
@@ -100,32 +107,61 @@ nominal d'une mise à jour, l'UUID étant dérivé du nom du fichier.
 - Échec pendant l'écriture : seul `.<S>.tmp` est supprimé ; boîte et `.pi` **identiques**
   (instantané complet avant/après, testé en V2, v6 et v7).
 - Échec de la mise à jour de l'index : `.pi`/`.pi.hidden` sont remis octet pour octet et
-  l'ancienne histoire est restaurée (testé).
+  l'ancienne histoire est restaurée **par renommages** (M0008) : `<S>` → `.<S>.tmp`, puis
+  `.<S>.old` → `<S>`, puis suppression de `.<S>.tmp`. Si le premier renommage échoue, `<S>`
+  est la nouvelle histoire **entière** (écrite en transit, installée par un seul renommage,
+  jamais entamée) : elle reste installée, `.old` est supprimé, `.pi` revient à l'instantané,
+  et l'erreur le dit (« elle reste installée »).
+- **Invariant (M0008, R4-1 de R004)** : aucun dossier d'histoire n'est supprimé sous un nom
+  qui compte. `<S>` et `.<S>.old` passent d'abord en `.<S>.tmp` (`discard_dir`), et seul
+  ce nom est supprimé : retour arrière, fin d'un remplacement réussi, nettoyage, et
+  suppression d'une histoire par la synchro (`remove_orphan_story`). Une suppression
+  interrompue ne laisse donc qu'un transit : `<S>` et `.<S>.old` sont **toujours** des
+  histoires entières. Vérifié par `grep` de chaque `remove_dir_all`/`remove_file` du module.
 - Interruption brutale : au début de l'import suivant **et** de « Réparer l'index »
-  (`storybox_import::repair_pack_index`, M0007), les restes sont jugés sur leur **contenu**
-  (`is_complete_story_dir`, critère ci-dessous), jamais sur leur seule présence :
+  (`storybox_import::repair_pack_index`), les restes sont repris **sans juger aucun contenu**,
+  puisque l'invariant exclut tout dossier partiel sous un nom définitif :
 
   | État trouvé | Action |
   |---|---|
-  | `.<S>.tmp` | supprimé (histoire jamais installée) |
-  | `.<S>.old` sans `<S>` | **restauré** en `<S>` (coupure entre les deux renommages), signalé |
-  | `.<S>.old` et `<S>` complet | `.old` supprimé (remplacement abouti) |
-  | `.<S>.old` complet et `<S>` incomplet | **échangés** : `.old` redevient `<S>`, la copie incomplète passe en `.<S>.tmp` puis est supprimée ; signalé |
-  | ni l'un ni l'autre complet | **rien n'est supprimé**, signalé ; un réimport de `<S>` échoue alors sans rien modifier (« Mise de côté… ») jusqu'à ce qu'un des deux soit retiré à la main |
+  | `.<S>.tmp` | supprimé (histoire jamais installée, ou suppression interrompue) |
+  | `.<S>.old` sans `<S>` | **restauré** en `<S>` (coupure entre deux renommages), signalé |
+  | `.<S>.old` et `<S>` | `.old` supprimé (via `.<S>.tmp`) : `<S>` est la nouvelle histoire, entière |
 
-  L'avant-dernière ligne ferme R3-1 (R003, A2) : après un double échec (index **et** retrait
-  partiel de la nouvelle histoire), `.old` est la seule copie saine ; avant M0007, l'import
-  suivant de **n'importe quelle** histoire la supprimait. Chaque étape de l'échange laisse un
-  état que ce même nettoyage sait reprendre. Les signalements vont au journal de l'app
-  (`⚠ Import interrompu : …`, et `PackIndexRepair.leftovers` pour la réparation). Les autres
-  dossiers cachés ne sont jamais touchés.
+  Les signalements vont au journal de l'app (`⚠ Import interrompu : …`, et
+  `PackIndexRepair.leftovers` pour la réparation). Les autres dossiers cachés ne sont jamais
+  touchés.
+
+  **Rectification (M0008).** M0007 écrivait ici « L'avant-dernière ligne ferme R3-1 », à propos
+  de l'échange `.old` complet / `<S>` incomplet. C'était **faux sur FAT** (R004, R4-1, perte
+  mesurée). Sur FAT, `readdir` rend l'ordre de **création** : une suppression en place
+  interrompue détruisait d'abord `rf/` et `sf/`, et laissait sous `<S>` une coquille que le
+  critère des fichiers de tête jugeait « complète ». `.old` était alors supprimé sans
+  signalement. Deux correctifs successifs (présence du dossier en M0006, puis cinq fichiers
+  en M0007) avaient **rétréci la fenêtre** sans en supprimer la cause. Ils sont remplacés par
+  l'invariant ci-dessus, et l'échange ainsi que le cas « aucun complet » sont retirés. Test :
+  `double_failure_keeps_previous_story_whatever_the_deletion_order` bloque tour à tour
+  **chaque** fichier de la nouvelle histoire (`chflags uchg`, que msdos respecte ; `chmod`
+  y est ignoré), si bien que le résultat ne dépend plus de l'ordre de `readdir`. Sur un
+  volume qui ignore `uchg`, le test **échoue** au lieu d'être sauté. Contre-épreuve :
+  remettre la suppression en place le fait passer au rouge sur APFS et sur FAT32.
+- **Verrou d'exclusion (M0008, R4-2)** : `DeviceWriteLock` (`main.rs`, un `Mutex` dans l'état
+  Tauri) est partagé par `start_sync`, `repair_pack_index`, `remove_orphan_story`,
+  `move_story_in_pack_index`, `reorder_story_in_pack_index` et `write_sidecar_after_push`.
+  Une opération lancée pendant qu'une autre tient le verrou est **refusée tout de suite**
+  (`try_lock`, sans attente), avec le message « Une autre opération est en cours sur la
+  boîte (synchronisation ou réparation). Attendez qu'elle se termine, puis réessayez. » Côté
+  front, « Réparer l'index » est désactivé pendant une synchro, puis revérifié après la
+  confirmation. Test : `concurrent_repair_is_refused_while_an_import_holds_the_lock`
+  (réparation refusée au point exact de P4, où la perte avait été mesurée).
 - Un échec de retour arrière n'est plus tu : il est ajouté au message d'erreur.
 - Les dossiers commençant par `.` sont ignorés par l'inventaire, le comptage et la
   réparation d'index.
-- Limite : un renommage de dossier sur FAT n'est pas atomique face à un débranchement ;
-  la fenêtre se réduit à deux appels système, que le nettoyage ci-dessus reprend. Le
-  nettoyage ne sait rien d'un dossier `<S>` abîmé autrement (fichier corrompu mais présent) :
-  la complétude est jugée sur la présence des fichiers, pas sur leur contenu chiffré.
+- Limite : un renommage de dossier sur FAT n'est pas atomique face à un débranchement
+  (système de fichiers à réparer, hors de portée de l'app). Le nettoyage ne sait rien d'un
+  dossier `<S>` abîmé autrement (fichier corrompu mais présent). Les restes laissés par les
+  builds de test M0006/M0007 (`<S>` partiel + `.old`) seraient repris en faveur de `<S>` :
+  ces builds n'ont jamais été publiés, et je ne peux pas affirmer qu'aucune boîte n'en porte.
 
 **Réparation d'index (M0006, revue en M0007 — réserve R3-2 de R003)** :
 `repair_pack_index_native` suit le critère de la référence (`device_storybox.py`,
@@ -160,9 +196,22 @@ jamais. Avant M0007, seul `.content/` était lu, et une histoire cachée par la 
 sortait de `.pi.hidden` au premier import. L'app, elle, ne cache ni ne déplace aucune
 histoire ; son inventaire ne liste que `.content/`.
 
-**Index illisible** : un `.pi` ou `.pi.hidden` absent ou de taille non multiple de 16 est
-reconstruit depuis les dossiers ; illisible (droits, E/S), la réparation échoue **sans rien
-écrire** (avant M0007, il était lu comme vide et les entrées incomplètes étaient perdues).
+**Index illisible ou tronqué (M0008, R4-3 et P5b de R004)** :
+- absent → reconstruit depuis les dossiers ;
+- **tronqué** (taille non multiple de 16, écriture coupée) → les entrées entières du début
+  sont **gardées dans leur ordre**, même incomplètes, et c'est signalé (`PackIndexRepair.notices`).
+  Avant M0008, l'index était lu comme vide : l'ordre et les entrées incomplètes étaient perdus ;
+- **illisible** (E/S, droits, dossier à sa place) :
+  - l'**import** échoue fermé, avec retour arrière et boîte identique. Le message nomme la
+    sortie : « L'index de la boîte est illisible (.pi : …). Utilisez « Réparer l'index » pour
+    le reconstruire (l'ancien sera gardé en .pi.bak). Index non modifié. » ;
+  - **« Réparer l'index »**, un geste explicite, renomme l'index illisible en `.pi.bak` (ou
+    `.pi.hidden.bak`), le reconstruit depuis `.content/` et le signale au journal (ordre
+    d'origine perdu, ancien fichier gardé). Si le renommage échoue, rien n'est écrit.
+  - Choix : l'import ne reconstruit jamais en silence (fail-closed, comme en M0007). La
+    reconstruction n'a lieu que sur demande, après sauvegarde. Avant M0008, l'erreur disait
+    seulement « Index non modifié », et la réparation échouait elle aussi : la boîte restait
+    bloquée sans sortie nommée.
 
 Le format des entrées de `.pi` n'a **pas** changé (voir Écarts connus) : hachages des
 fonctions d'écriture de `.pi`, de `write_story_files` (V2, `ni`, `bt`) et de

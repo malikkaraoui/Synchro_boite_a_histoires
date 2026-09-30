@@ -164,3 +164,28 @@
 - **Correctif (M0007, R3-1)** : `.old` n'est supprimé que si `<S>` est complet ; `<S>` incomplet + `.old` complet → échange ; aucun complet → rien n'est supprimé, c'est signalé. La réparation commence par ce nettoyage. Contre-épreuve : réintroduire l'ancien comportement fait échouer 4 tests (A2, A3, échange, aucun complet) sur des assertions nommées.
 - **Leçon (transverse, R5)** : même piège que `stat` contre lecture (M0004) : une procédure de reprise juge l'état sur le **contenu** (complétude), jamais sur la **présence** d'un dossier.
 - **Source** : `storybox_import.rs::clean_import_leftovers`, `storybox_import.rs::repair_pack_index`, tests `double_failure_then_other_import_keeps_previous_story`, `repair_after_interrupted_rename_keeps_story_indexed`
+- **Révisé (M0008, 2026-09-30)** : ce correctif ne tenait que pour l'ordre de suppression d'APFS. Sur FAT32, R004 (R4-1) a mesuré la perte (voir les trois entrées ci-dessous). L'échange et le cas « aucun complet » sont retirés, et remplacés par l'invariant de renommage. La leçon « contenu plutôt que présence » reste vraie, mais elle ne suffit pas : mieux vaut qu'aucun dossier partiel ne porte jamais de nom définitif, ce qui supprime le jugement lui-même.
+
+### 2026-09-30 · Sur FAT32, `readdir` rend l'ordre de création (APFS : ordre de hachage)
+
+- **Découverte** : sur un volume msdos (FAT32 monté par macOS), `fs::read_dir` rend les entrées dans l'ordre de leur **création**. Sur APFS, l'ordre suit le hachage des noms. Mesuré par R004 sur le même dossier d'histoire : FAT `["rf", "sf", "ri", "si", "li", "ni", "bt", ".la-forge-a-histoires.json"]`, APFS `["ni", "ri", "rf", "sf", "si", "bt", "li", …]`, puis rejoué en M0008 (sonde P1 de R004, même résultat).
+- **Impact** : `remove_dir_all` suit `readdir`. Sur FAT, une suppression interrompue détruit donc d'abord ce qui a été créé en premier (`rf/`, `sf/`), et garde les fichiers de tête : il reste une coquille que le critère de complétude jugeait saine (R4-1, perte mesurée). Le test permanent de M0007 ne passait que grâce à l'ordre d'APFS.
+- **Leçon (transverse, R5)** : un test de reprise validé sur APFS ne prouve rien pour FAT. Soit on rejoue le point d'arrêt pour **chaque** fichier (ce que fait `double_failure_keeps_previous_story_whatever_the_deletion_order`), soit on rejoue la suite sur une image FAT (`hdiutil create -fs "MS-DOS FAT32"`, `TMPDIR=/Volumes/<X>/tmp cargo test`).
+- **Source** : `vault/revues/2026-09-30-R004-doublage-M0007-candidat-main.md` (axe A, P1), M0008 (sonde P1 rejouée sur APFS et FAT32)
+
+### 2026-09-30 · `chflags uchg` injecte un échec sur FAT, `chmod` non
+
+- **Découverte** : msdos **ignore** `chmod`, ce qui faisait sauter en silence les tests d'échec sur FAT. Il **respecte** `chflags uchg` sur un **fichier** : `rm` → `Operation not permitted`, et `remove_dir_all` s'arrête sur ce fichier. Il **ignore** en revanche `uchg` sur un **dossier** (mesuré en M0008 : `mv` d'un dossier `uchg` réussit, et le drapeau n'apparaît pas dans `ls -lO`).
+- **Usage (M0008)** :
+  - pour faire échouer une suppression, poser `uchg` sur un fichier, avec une garde qui fait `chflags -R nouchg` au drop, même si le test panique ;
+  - pour faire échouer un renommage de dossier sur tout volume, occuper la cible par un dossier non vide (`ENOTEMPTY`, os error 66, mesuré sur FAT) ;
+  - un volume qui ignore `uchg` fait **échouer** le test (`require_uchg`), au lieu de le sauter.
+- **Leçon (transverse, R5)** : un test d'échec qui se saute lui-même quand l'injection ne prend pas donne un vert trompeur, précisément sur le volume cible. L'injecteur doit être vérifié, et son absence doit faire échouer le test.
+- **Source** : `storybox_import.rs::test_uchg`, R004 (axe A, « chflags uchg, respecté par APFS et par msdos »)
+
+### 2026-09-30 · Loi des deux patchs appliquée : le retour arrière passe par renommage
+
+- **Constat** : R3-1 (M0006, jugé sur la présence du dossier), puis R4-1 (M0007, jugé sur cinq fichiers de tête), sont deux défauts successifs de la **même classe** : la reprise juge un dossier partiel laissé sous son nom définitif. Chaque correctif a rétréci la fenêtre sans la fermer.
+- **Changement de mécanisme (M0008)** : tout dossier d'histoire est renommé en `.<S>.tmp` **avant** d'être supprimé (`discard_dir`). Cela vaut pour le retour arrière d'index, la fin d'un remplacement, le nettoyage et `remove_orphan_story`. `<S>` et `.<S>.old` sont donc toujours des histoires entières. `clean_import_leftovers` ne juge plus aucun contenu : l'échange et le cas « aucun complet » sont supprimés. Suite complète : 99/99 sur APFS et sur FAT32. Contre-épreuve : la suppression en place, remise, fait passer le test au rouge sur les deux volumes.
+- **Leçon (transverse, R5)** : au deuxième défaut d'une même classe, on change le mécanisme au lieu de corriger le symptôme. Un retour arrière ne laisse jamais d'état partiel sous un nom qui compte : on renomme vers un nom jetable, puis on supprime.
+- **Source** : `storybox_import.rs::install_story`, `discard_dir`, `clean_import_leftovers` ; `storybox_sync.rs::remove_orphan_story` ; R004 (« Options de reconception », 1)
