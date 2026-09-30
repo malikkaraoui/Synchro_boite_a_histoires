@@ -140,6 +140,8 @@ h2.device-named { font-size: 18px; font-weight: 800; color: var(--text); text-tr
 .badge-connected::before { background: var(--accent); }
 .badge-disconnected { background: #f3f4f6; color: var(--muted); }
 .badge-disconnected::before { background: var(--muted); }
+.badge-access       { background: #fdf3e1; color: #9a5b00; }
+.badge-access::before { background: var(--warn); }
 
 /* ── Barre de stockage ─────────────────────────────────────────────────────── */
 .storage-wrap {
@@ -184,6 +186,7 @@ h2.device-named { font-size: 18px; font-weight: 800; color: var(--text); text-tr
   display: flex; align-items: center; justify-content: center;
   height: 100%; color: var(--muted); font-size: 13px;
 }
+#device-empty { flex-direction: column; line-height: 1.5; }
 
 /* ── Story row (device) ────────────────────────────────────────────────────── */
 .story-row {

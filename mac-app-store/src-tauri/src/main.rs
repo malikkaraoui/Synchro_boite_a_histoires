@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app_settings;
+mod sandbox_access;
 mod storybox_crypto;
 mod storybox_device;
 mod storybox_import;
@@ -8,28 +9,135 @@ mod storybox_sync;
 mod story_pack;
 mod studio_story;
 
-use storybox_device::{StoryBoxDeviceInfo, StoryBoxDeviceProbe, StoryBoxInventoryResult, StoryCompareResult};
+use sandbox_access::SandboxAccess;
+use serde::Serialize;
+use std::path::Path;
+use storybox_device::{
+    DeviceState, StoryBoxDeviceInfo, StoryBoxDeviceProbe, StoryBoxInventoryResult, StoryCompareResult,
+};
 use storybox_sync::{AudioFile, StorageInfo, SyncPlan};
-use tauri::Emitter;
+use tauri::{Emitter, Manager, State};
 
 // ── Commandes device ──────────────────────────────────────────────────────────
 
+/// Détection. Une boîte déjà validée est resondée seule ; sinon on cherche dans `/Volumes`
+/// et, si la boîte y est illisible (sandbox), on tente de rouvrir l'accès par son bookmark.
 #[tauri::command]
-fn probe_storybox_device() -> StoryBoxDeviceProbe {
-    storybox_device::probe_storybox_device()
+fn probe_storybox_device(app: tauri::AppHandle, access: State<'_, SandboxAccess>) -> StoryBoxDeviceProbe {
+    if let Some(mount) = access.validated_mount() {
+        let probe = storybox_device::probe_mount(Path::new(&mount));
+        if probe.connected {
+            return probe;
+        }
+        // Débranchée, éjectée ou redevenue illisible : `stopAccessing…` au drop.
+        access.clear_device();
+    }
+
+    let probe = storybox_device::probe_storybox_device();
+    match (probe.state, probe.mount.clone()) {
+        (DeviceState::Connected, Some(mount)) => {
+            access.set_device(mount, None);
+            probe
+        }
+        (DeviceState::AccessRequired, Some(mount)) => {
+            restore_device_access(&app, &access, &mount).unwrap_or(probe)
+        }
+        _ => probe,
+    }
+}
+
+/// Rouvre l'accès à `mount` avec le bookmark de la même boîte, s'il y en a un.
+fn restore_device_access(
+    app: &tauri::AppHandle,
+    access: &SandboxAccess,
+    mount: &str,
+) -> Option<StoryBoxDeviceProbe> {
+    let mut settings = app_settings::load(app);
+    for (device_id, bookmark) in settings.device_bookmarks() {
+        // Une boîte débranchée ne se résout pas (aucun montage automatique).
+        let Ok(resolved) = sandbox_access::resolve(&bookmark) else { continue };
+        if resolved.path != Path::new(mount) {
+            continue;
+        }
+        let probe = storybox_device::probe_mount(Path::new(mount));
+        if !probe.connected || probe.device_id.as_deref() != Some(device_id.as_str()) {
+            continue;
+        }
+        if resolved.stale {
+            match sandbox_access::create_bookmark(Path::new(mount)) {
+                Ok(fresh) => {
+                    settings.set_device_bookmark(&device_id, &fresh);
+                    if let Err(e) = app_settings::save(app, &settings) {
+                        eprintln!("[sandbox] bookmark boîte régénéré mais non enregistré : {e}");
+                    }
+                }
+                Err(e) => eprintln!("[sandbox] bookmark boîte périmé non régénéré : {e}"),
+            }
+        }
+        access.set_device(mount.to_string(), Some(resolved.access));
+        return Some(probe);
+    }
+    None
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceAccessGrant {
+    probe: StoryBoxDeviceProbe,
+    /// Faux si l'accès ne vaut que pour cette session (bookmark non enregistré).
+    remembered: bool,
+    warning: Option<String>,
+}
+
+/// Appelée après le NSOpenPanel : valide la boîte choisie et mémorise son bookmark.
+#[tauri::command]
+fn grant_device_access(
+    app: tauri::AppHandle,
+    access: State<'_, SandboxAccess>,
+    path: String,
+) -> Result<DeviceAccessGrant, String> {
+    let mount = Path::new(&path);
+    let probe = storybox_device::probe_mount(mount);
+    match probe.state {
+        DeviceState::Connected => {}
+        DeviceState::AccessRequired => {
+            return Err("macOS refuse encore la lecture de la boîte. Réessayez en choisissant la boîte elle-même.".to_string())
+        }
+        DeviceState::NotConnected => {
+            return Err("Ce dossier n'est pas une boîte à histoires. Choisissez la boîte elle-même, dans la colonne de gauche de la fenêtre.".to_string())
+        }
+    }
+    let warning = remember_device(&app, &probe, mount).err();
+    if let Some(w) = &warning {
+        eprintln!("[sandbox] {w}");
+    }
+    access.set_device(path, None);
+    Ok(DeviceAccessGrant { remembered: warning.is_none(), warning, probe })
+}
+
+fn remember_device(app: &tauri::AppHandle, probe: &StoryBoxDeviceProbe, mount: &Path) -> Result<(), String> {
+    let device_id = probe
+        .device_id
+        .as_deref()
+        .ok_or_else(|| "Identifiant de la boîte illisible : accès non mémorisé".to_string())?;
+    let bookmark = sandbox_access::create_bookmark(mount)?;
+    let mut settings = app_settings::load(app);
+    settings.set_device_bookmark(device_id, &bookmark);
+    app_settings::save(app, &settings).map_err(|e| format!("Réglages non enregistrés : {e}"))
 }
 
 #[tauri::command]
-fn get_storybox_inventory() -> StoryBoxInventoryResult {
-    storybox_device::get_storybox_inventory()
+fn get_storybox_inventory(access: State<'_, SandboxAccess>) -> StoryBoxInventoryResult {
+    storybox_device::get_storybox_inventory(access.validated_mount().as_deref())
 }
 
 #[tauri::command]
 fn check_story_on_device(
+    access: State<'_, SandboxAccess>,
     story_id: String,
     local_hash: Option<String>,
 ) -> Option<StoryCompareResult> {
-    storybox_device::check_story_on_device(story_id, local_hash)
+    storybox_device::check_story_on_device(access.validated_mount().as_deref(), story_id, local_hash)
 }
 
 #[tauri::command]
@@ -49,45 +157,108 @@ fn list_audio_files(folder_path: String) -> Result<Vec<AudioFile>, String> {
     storybox_sync::scan_audio_folder(&folder_path)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FolderAccessGrant {
+    remembered: bool,
+    warning: Option<String>,
+}
+
+/// Appelée après le NSOpenPanel du dossier audio : mémorise le dossier avec son bookmark.
+#[tauri::command]
+fn grant_audio_folder_access(
+    app: tauri::AppHandle,
+    access: State<'_, SandboxAccess>,
+    folder: String,
+) -> Result<FolderAccessGrant, String> {
+    std::fs::read_dir(&folder).map_err(|e| format!("Lecture dossier échouée : {e}"))?;
+    let bookmark = sandbox_access::create_bookmark(Path::new(&folder));
+    let mut settings = app_settings::load(&app);
+    settings.set_audio_folder(&folder, bookmark.as_deref().ok());
+    let mut warning = bookmark.err();
+    if let Err(e) = app_settings::save(&app, &settings) {
+        warning = Some(format!("Réglages non enregistrés : {e}"));
+    }
+    if let Some(w) = &warning {
+        eprintln!("[sandbox] {w}");
+    }
+    // L'accès au nouveau dossier vient du NSOpenPanel ; l'ancien accès est refermé.
+    access.set_audio(None);
+    Ok(FolderAccessGrant { remembered: warning.is_none(), warning })
+}
+
+/// Au lancement : rouvre le dossier audio mémorisé, uniquement par son bookmark.
+/// `Ok(None)` : aucun dossier mémorisé avec bookmark (`lastAudioFolder` seul n'est pas relu).
+#[tauri::command]
+fn restore_audio_folder(
+    app: tauri::AppHandle,
+    access: State<'_, SandboxAccess>,
+) -> Result<Option<String>, String> {
+    let mut settings = app_settings::load(&app);
+    let Some(bookmark) = settings.audio_folder_bookmark() else { return Ok(None) };
+    let resolved = sandbox_access::resolve(&bookmark)?;
+    let folder = resolved.path.to_string_lossy().into_owned();
+    if resolved.stale {
+        match sandbox_access::create_bookmark(&resolved.path) {
+            Ok(fresh) => {
+                settings.set_audio_folder(&folder, Some(&fresh));
+                if let Err(e) = app_settings::save(&app, &settings) {
+                    eprintln!("[sandbox] bookmark dossier régénéré mais non enregistré : {e}");
+                }
+            }
+            Err(e) => eprintln!("[sandbox] bookmark dossier périmé non régénéré : {e}"),
+        }
+    }
+    access.set_audio(Some(resolved.access));
+    Ok(Some(folder))
+}
+
 // ── Commandes sync ────────────────────────────────────────────────────────────
 
 #[tauri::command]
-fn scan_and_plan(folder_path: String) -> Result<SyncPlan, String> {
+fn scan_and_plan(access: State<'_, SandboxAccess>, folder_path: String) -> Result<SyncPlan, String> {
     let audio_files = storybox_sync::scan_audio_folder(&folder_path)?;
-    let inventory = storybox_device::get_storybox_inventory();
+    let inventory = storybox_device::get_storybox_inventory(access.validated_mount().as_deref());
     Ok(storybox_sync::determine_needed_pushes(&audio_files, &inventory))
 }
 
 #[tauri::command]
 fn write_sidecar_after_push(
+    access: State<'_, SandboxAccess>,
     mount: String,
     short_uuid: String,
     story_id: String,
     hash: String,
 ) -> Result<(), String> {
+    access.require_mount(&mount)?;
     storybox_sync::write_sidecar(&mount, &short_uuid, &story_id, &hash)
 }
 
 #[tauri::command]
-fn remove_orphan_story(mount: String, short_uuid: String) -> Result<(), String> {
+fn remove_orphan_story(access: State<'_, SandboxAccess>, mount: String, short_uuid: String) -> Result<(), String> {
+    access.require_mount(&mount)?;
     storybox_sync::remove_orphan_story(&mount, &short_uuid)
 }
 
 #[tauri::command]
 fn move_story_in_pack_index(
+    access: State<'_, SandboxAccess>,
     mount: String,
     short_uuid: String,
     direction: i32,
 ) -> Result<(), String> {
+    access.require_mount(&mount)?;
     storybox_device::move_story_in_pack_index(&mount, &short_uuid, direction)
 }
 
 #[tauri::command]
 fn reorder_story_in_pack_index(
+    access: State<'_, SandboxAccess>,
     mount: String,
     short_uuid: String,
     new_index: usize,
 ) -> Result<(), String> {
+    access.require_mount(&mount)?;
     storybox_device::reorder_story_in_pack_index(&mount, &short_uuid, new_index)
 }
 
@@ -106,13 +277,6 @@ fn save_device_name(
 ) -> Result<(), String> {
     let mut settings = app_settings::load(&app);
     settings.devices.insert(device_id, app_settings::DeviceInfo { name });
-    app_settings::save(&app, &settings).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn save_last_folder(app: tauri::AppHandle, folder: String) -> Result<(), String> {
-    let mut settings = app_settings::load(&app);
-    settings.last_audio_folder = Some(folder);
     app_settings::save(&app, &settings).map_err(|e| e.to_string())
 }
 
@@ -158,12 +322,6 @@ async fn eject_device(mount: String) -> Result<(), String> {
     Err("Éjectez la boîte depuis le Finder (clic droit sur le volume → Éjecter).".to_string())
 }
 
-/// Vérifie qu'un chemin est bien une boîte boîte à histoires (fichier .md présent).
-#[tauri::command]
-fn validate_storybox_mount(path: String) -> bool {
-    std::path::Path::new(&path).join(".md").exists()
-}
-
 // ── Pipeline d'import natif Rust ──────────────────────────────────────────────
 //
 // Pour chaque fichier audio sélectionné :
@@ -175,11 +333,13 @@ fn validate_storybox_mount(path: String) -> bool {
 #[tauri::command]
 async fn start_sync(
     app: tauri::AppHandle,
+    access: State<'_, SandboxAccess>,
     folder_path: String,
     device_mount: String,
     selected_files: Vec<String>,
 ) -> Result<String, String> {
     let _ = folder_path;
+    access.require_mount(&device_mount)?;
     let total = selected_files.len();
     emit_sync_line(&app, serde_json::json!({
         "type": "progress", "step": "scan",
@@ -269,7 +429,8 @@ fn emit_sync_line(app: &tauri::AppHandle, payload: serde_json::Value) {
 
 /// Répare le fichier d'index (.pi) de la boîte à histoires en pur Rust.
 #[tauri::command]
-async fn repair_pack_index(device_mount: String) -> Result<String, String> {
+async fn repair_pack_index(access: State<'_, SandboxAccess>, device_mount: String) -> Result<String, String> {
+    access.require_mount(&device_mount)?;
     storybox_device::repair_pack_index_native(&device_mount)?;
     Ok("ok".to_string())
 }
@@ -304,13 +465,17 @@ async fn download_and_install_update(app: tauri::AppHandle) -> Result<(), String
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(SandboxAccess::default())
         .invoke_handler(tauri::generate_handler![
             probe_storybox_device,
+            grant_device_access,
             get_device_info,
             get_storybox_inventory,
             check_story_on_device,
             get_storage_info,
             list_audio_files,
+            grant_audio_folder_access,
+            restore_audio_folder,
             scan_and_plan,
             write_sidecar_after_push,
             remove_orphan_story,
@@ -318,17 +483,21 @@ fn main() {
             reorder_story_in_pack_index,
             get_app_settings,
             save_device_name,
-            save_last_folder,
             get_cover_base64,
             get_distribution_channel,
             eject_device,
-            validate_storybox_mount,
             start_sync,
             check_for_update,
             open_release_page,
             download_and_install_update,
             repair_pack_index,
         ])
-        .run(tauri::generate_context!())
-        .expect("Erreur au démarrage de Synchro Boîte à histoires");
+        .build(tauri::generate_context!())
+        .expect("Erreur au démarrage de Synchro Boîte à histoires")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Fermeture : `stopAccessingSecurityScopedResource` sur tous les accès ouverts.
+                app.state::<SandboxAccess>().release_all();
+            }
+        });
 }

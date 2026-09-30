@@ -12,6 +12,7 @@ let distributionChannelPromise = null;
 let importAudioSupported = true;
 let deviceMount   = null;
 let deviceId      = null;
+let accessMount   = null;     // boîte vue mais illisible (sandbox) : en attente d'autorisation
 let appSettings   = { devices: {}, lastAudioFolder: null, theme: "auto" };
 let deviceStories = [];       // StoryBoxStoryEntry[]
 let audioFiles    = [];       // AudioFile[]
@@ -355,19 +356,10 @@ function openRenameModal(id) {
 async function pollDevice() {
   if (syncing || reordering || draggingStory) return;
   try {
-    let probe;
-    if (isMacAppStoreChannel() && deviceMount) {
-      const valid = await invoke("validate_storybox_mount", { path: deviceMount });
-      if (valid) {
-        probe = { connected: true, mount: deviceMount, deviceId: null, markerFound: true, contentDirPresent: true, storyDirCount: 0 };
-      } else {
-        deviceMount = null;
-        probe = await invoke("probe_storybox_device");
-      }
-    } else {
-      probe = await invoke("probe_storybox_device");
-    }
+    // Rust resonde la boîte validée sans reparcourir /Volumes, ou rouvre l'accès par son bookmark.
+    const probe = await invoke("probe_storybox_device");
     if (probe.connected && probe.mount) {
+      accessMount = null;
       deviceMount = probe.mount;
       deviceId = probe.deviceId || null;
       $deviceBadge.className = "device-badge badge-connected";
@@ -377,6 +369,7 @@ async function pollDevice() {
       $ejectBtn.classList.remove("hidden");
       $repairBtn.classList.remove("hidden");
       $selectStoryboxBtn?.classList.add("hidden");
+      $deviceEmptyLabel.textContent = DEVICE_EMPTY_TEXT;
       // Affiche le nom ou propose d'en donner un
       if (deviceId) {
         // Migration : purger toutes les vieilles entrées UUID dès qu'une entrée serial existe
@@ -394,7 +387,6 @@ async function pollDevice() {
               }
             }
             for (const id of oldUUIDs) delete appSettings.devices[id];
-            await invoke("save_last_folder", { deviceId, folder: appSettings.devices[deviceId]?.lastFolder || "" });
           }
         }
         renderDeviceName(deviceId);
@@ -405,6 +397,7 @@ async function pollDevice() {
       const inv = await invoke("get_storybox_inventory");
       deviceStories = inv.stories || [];
       renderDeviceList();
+      renderInventoryProblem(inv);
 
       // Infos firmware
       try {
@@ -422,11 +415,13 @@ async function pollDevice() {
       } catch { /* silencieux */ }
 
     } else {
+      const needsAccess = probe.state === "access_required" && !!probe.mount;
+      accessMount = needsAccess ? probe.mount : null;
       deviceMount = null;
       deviceStories = [];
       pendingDeletes.clear();
-      $deviceBadge.className = "device-badge badge-disconnected";
-      $deviceBadge.textContent = "Non connectée";
+      $deviceBadge.className = "device-badge " + (needsAccess ? "badge-access" : "badge-disconnected");
+      $deviceBadge.textContent = needsAccess ? "Accès à autoriser" : "Non connectée";
       $devicePath.classList.add("hidden");
       $ejectBtn.classList.add("hidden");
       $repairBtn.classList.add("hidden");
@@ -437,10 +432,20 @@ async function pollDevice() {
       $deviceFwLabel.classList.add("hidden");
       const $t = document.getElementById("panel-device-title");
       if ($t) { $t.textContent = "Boîte à histoires"; $t.classList.remove("device-named"); }
-      if (isMacAppStoreChannel()) $selectStoryboxBtn?.classList.remove("hidden");
+      if (needsAccess) {
+        $deviceEmptyLabel.textContent = ACCESS_REQUIRED_TEXT;
+        $selectStoryboxBtn.textContent = "Autoriser l'accès à la boîte";
+        $selectStoryboxBtn.classList.remove("hidden");
+      } else {
+        $deviceEmptyLabel.textContent = DEVICE_EMPTY_TEXT;
+        $selectStoryboxBtn.textContent = "Sélectionner la boîte à histoires…";
+        if (isMacAppStoreChannel()) $selectStoryboxBtn.classList.remove("hidden");
+        else $selectStoryboxBtn.classList.add("hidden");
+      }
     }
   } catch (e) {
     deviceMount = null;
+    log("err", `Détection de la boîte échouée : ${e}`);
   }
   refreshFolderBadges();
   updateSyncButton();
@@ -456,11 +461,38 @@ function renderStorage(st) {
   $storageWrap.classList.remove("hidden");
 }
 
+const DEVICE_EMPTY_TEXT = "Branchez votre boîte à histoires";
+const ACCESS_REQUIRED_TEXT =
+  "Votre boîte est branchée. Pour que l'app puisse lire et ajouter des histoires, " +
+  "macOS demande votre accord, une seule fois.";
+
+// Une erreur d'inventaire ne doit jamais ressembler à une boîte vide.
+let lastInventoryProblem = null;
+function renderInventoryProblem(inv) {
+  let text = null;
+  if (inv.status === "read_error") {
+    text = "Impossible de lire les histoires de la boîte." + (inv.error ? ` (${inv.error})` : "");
+  } else if (inv.status === "no_content_dir") {
+    text = "Aucune histoire sur cette boîte pour l'instant.";
+  } else if (inv.status === "not_connected") {
+    text = "La boîte n'est plus accessible. Rebranchez-la.";
+  }
+  const changed = text !== lastInventoryProblem;
+  lastInventoryProblem = text;
+  if (!text) return;
+  $deviceHeader.style.display = "none";
+  $deviceEmptyLabel.textContent = text;
+  $deviceEmpty.classList.remove("hidden");
+  // Journalisé une fois par changement, pas à chaque poll de 3 s.
+  if (changed && inv.status !== "no_content_dir") log("err", text);
+}
+
 async function refreshDeviceInventory() {
   if (!deviceMount) return;
   const inv = await invoke("get_storybox_inventory");
   deviceStories = inv.stories || [];
   renderDeviceList();
+  renderInventoryProblem(inv);
   refreshFolderBadges();
   updateSyncButton();
 }
@@ -804,29 +836,41 @@ async function loadFolder(folderPath) {
 $pickBtn.addEventListener("click", async () => {
   const selected = await open({ directory: true, multiple: false });
   if (!selected) return;
-  await invoke("save_last_folder", { folder: selected });
+  try {
+    // Mémorise le dossier avec son bookmark security-scoped (accès conservé au prochain lancement).
+    const grant = await invoke("grant_audio_folder_access", { folder: selected });
+    if (!grant.remembered) {
+      log("err", `Dossier ouvert pour cette session seulement : ${grant.warning}`);
+    }
+  } catch (e) {
+    showToast(`Dossier illisible : ${e}`, "err", 6000);
+    return;
+  }
   appSettings.lastAudioFolder = selected;
   await loadFolder(selected);
 });
 
 $selectStoryboxBtn?.addEventListener("click", async () => {
   try {
-    const selected = await open({ directory: true, multiple: false, title: "Sélectionner la boîte à histoires boîte à histoires" });
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      defaultPath: accessMount || "/Volumes",
+      title: "Choisissez votre boîte à histoires, puis cliquez sur Ouvrir",
+    });
     if (!selected) return;
     const path = typeof selected === "string" ? selected : selected[0];
     if (!path) return;
-    const valid = await invoke("validate_storybox_mount", { path });
-    if (!valid) {
-      showToast("Ce dossier ne semble pas être une boîte boîte à histoires (fichier .md absent).", "error");
-      return;
+    const grant = await invoke("grant_device_access", { path });
+    if (!grant.remembered) {
+      log("err", `Accès accordé pour cette session seulement : ${grant.warning}`);
     }
-    deviceMount = path;
     $selectStoryboxBtn.classList.add("hidden");
     await pollDevice();
   } catch (e) {
     const msg = String(e);
     if (!msg.includes("annulé") && !msg.toLowerCase().includes("cancel")) {
-      showToast("Erreur lors de la sélection : " + msg, "error");
+      showToast(msg, "err", 6000);
     }
   }
 });
@@ -1241,8 +1285,12 @@ $repairBtn.addEventListener("click", async () => {
   const themeRadio = document.querySelector(`input[name="theme"][value="${savedTheme}"]`);
   if (themeRadio) themeRadio.checked = true;
 
-  if (appSettings.lastAudioFolder) {
-    try { await loadFolder(appSettings.lastAudioFolder); } catch {}
+  // Le dossier audio n'est rouvert que par son bookmark (sous sandbox, le chemin seul est illisible).
+  try {
+    const folder = await invoke("restore_audio_folder");
+    if (folder) await loadFolder(folder);
+  } catch (e) {
+    log("err", `Dossier audio mémorisé inaccessible, choisissez-le à nouveau : ${e}`);
   }
 
   await splashPromise;

@@ -7,9 +7,23 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// État d'une boîte vue par la détection.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceState {
+    NotConnected,
+    /// Boîte présente (`stat` autorisé) mais illisible : sous sandbox, l'utilisateur doit
+    /// l'autoriser une fois dans le NSOpenPanel.
+    AccessRequired,
+    /// Boîte présente et `.md` lisible.
+    Connected,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StoryBoxDeviceProbe {
+    pub state: DeviceState,
+    /// Vrai seulement si la boîte est lisible (`state == Connected`).
     pub connected: bool,
     pub mount: Option<String>,
     pub device_id: Option<String>,
@@ -143,12 +157,13 @@ pub fn compare_story(
     }
 }
 
-/// Vérifie si une story Studio est présente sur le device, avec comparaison de hash.
+/// Vérifie si une story Studio est présente sur la boîte validée, avec comparaison de hash.
 pub fn check_story_on_device(
+    mount: Option<&str>,
     story_id: String,
     local_hash: Option<String>,
 ) -> Option<StoryCompareResult> {
-    let result = get_storybox_inventory();
+    let result = get_storybox_inventory(mount);
     if result.status != InventoryStatus::Ok {
         return None;
     }
@@ -158,6 +173,7 @@ pub fn check_story_on_device(
 impl StoryBoxDeviceProbe {
     fn disconnected() -> Self {
         Self {
+            state: DeviceState::NotConnected,
             connected: false,
             mount: None,
             device_id: None,
@@ -183,12 +199,27 @@ impl StoryBoxDeviceProbe {
         };
 
         Self {
+            state: DeviceState::Connected,
             connected: true,
             mount: Some(mount.to_string_lossy().into_owned()),
             device_id,
             marker_found,
             content_dir_present: content_dir.is_dir(),
             story_dir_count,
+            detection_method: Some(detection_method.to_string()),
+        }
+    }
+
+    /// Boîte vue mais illisible : rien n'est lu, seul le point de montage est renvoyé.
+    fn access_required(mount: PathBuf, detection_method: &str, marker_found: bool) -> Self {
+        Self {
+            state: DeviceState::AccessRequired,
+            connected: false,
+            mount: Some(mount.to_string_lossy().into_owned()),
+            device_id: None,
+            marker_found,
+            content_dir_present: false,
+            story_dir_count: 0,
             detection_method: Some(detection_method.to_string()),
         }
     }
@@ -460,9 +491,16 @@ fn sorted_child_dirs(root: &Path) -> Vec<PathBuf> {
 }
 
 fn probe_mount_candidate(path: &Path) -> Option<StoryBoxDeviceProbe> {
-    // Méthode 1 : fichier marqueur `.md` à la racine (boîte à histoires officiel)
-    if path.join(".md").exists() {
-        return Some(StoryBoxDeviceProbe::connected(path.to_path_buf(), "marker", true));
+    // Méthode 1 : fichier marqueur `.md` à la racine (boîte à histoires officiel).
+    // `exists()` n'est qu'un `stat`, autorisé sous sandbox même sans accès : la boîte n'est
+    // « connectée » que si `.md` se lit réellement.
+    let marker = path.join(".md");
+    if marker.exists() {
+        return Some(if fs::read(&marker).is_ok() {
+            StoryBoxDeviceProbe::connected(path.to_path_buf(), "marker", true)
+        } else {
+            StoryBoxDeviceProbe::access_required(path.to_path_buf(), "marker", true)
+        });
     }
 
     // Méthode 2 : nom de volume contient "STORYBOX" (fallback macOS/Windows)
@@ -471,7 +509,11 @@ fn probe_mount_candidate(path: &Path) -> Option<StoryBoxDeviceProbe> {
         .map(|n| n.to_string_lossy().to_uppercase())
         .unwrap_or_default();
     if name.contains("STORYBOX") {
-        return Some(StoryBoxDeviceProbe::connected(path.to_path_buf(), "volume-name", false));
+        return Some(if fs::read_dir(path).is_ok() {
+            StoryBoxDeviceProbe::connected(path.to_path_buf(), "volume-name", false)
+        } else {
+            StoryBoxDeviceProbe::access_required(path.to_path_buf(), "volume-name", false)
+        });
     }
 
     None
@@ -534,6 +576,11 @@ fn probe_platform() -> StoryBoxDeviceProbe {
 
 pub fn probe_storybox_device() -> StoryBoxDeviceProbe {
     probe_platform()
+}
+
+/// Sonde un point de montage connu (boîte validée ou choisie), sans parcourir `/Volumes`.
+pub fn probe_mount(mount: &Path) -> StoryBoxDeviceProbe {
+    probe_mount_candidate(mount).unwrap_or_else(StoryBoxDeviceProbe::disconnected)
 }
 
 /// Parse `.la-forge-a-histoires.json` depuis un dossier story.
@@ -790,13 +837,11 @@ pub fn read_inventory(mount: &Path) -> Option<StoryBoxInventory> {
     })
 }
 
-/// Détecte le device et retourne un inventaire discriminé.
-pub fn get_storybox_inventory() -> StoryBoxInventoryResult {
-    let probe = probe_platform();
-
-    let mount_str = match probe.mount {
-        Some(m) if probe.connected => m,
-        _ => {
+/// Inventaire discriminé de la boîte validée (`mount`), sans reprober `/Volumes`.
+pub fn get_storybox_inventory(mount: Option<&str>) -> StoryBoxInventoryResult {
+    let mount_str = match mount {
+        Some(m) => m.to_string(),
+        None => {
             return StoryBoxInventoryResult {
                 status: InventoryStatus::NotConnected,
                 mount: None,
@@ -835,7 +880,12 @@ pub fn get_storybox_inventory() -> StoryBoxInventoryResult {
             stories: vec![],
             total_stories: 0,
             managed_stories: 0,
-            error: Some("Lecture de .content/ échouée — permissions ou erreur I/O".to_string()),
+            error: Some(
+                fs::read_dir(&content_dir)
+                    .err()
+                    .map(|e| format!("Lecture de .content/ échouée : {e}"))
+                    .unwrap_or_else(|| "Lecture de .content/ échouée — permissions ou erreur I/O".to_string()),
+            ),
         },
     }
 }
@@ -843,10 +893,11 @@ pub fn get_storybox_inventory() -> StoryBoxInventoryResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_story, move_story_in_pack_index, probe_root, read_inventory,
-        read_sidecar, repair_pack_index_native, reorder_story_in_pack_index,
+        compare_story, get_storybox_inventory, move_story_in_pack_index, probe_mount, probe_root,
+        read_inventory, read_sidecar, repair_pack_index_native, reorder_story_in_pack_index,
         write_pack_index_entries,
-        StoryBoxDeviceProbe, StoryBoxStoryEntry, SidecarData, StoryDeviceStatus,
+        DeviceState, InventoryStatus, StoryBoxDeviceProbe, StoryBoxStoryEntry, SidecarData,
+        StoryDeviceStatus,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -892,6 +943,7 @@ mod tests {
 
         let probe = connected_probe(root.path());
         assert!(probe.connected);
+        assert_eq!(probe.state, DeviceState::Connected);
         assert_eq!(probe.mount, Some(mount.to_string_lossy().into_owned()));
         assert!(probe.marker_found);
         assert!(probe.content_dir_present);
@@ -910,6 +962,107 @@ mod tests {
         assert_eq!(probe.mount, Some(mount.to_string_lossy().into_owned()));
         assert!(!probe.marker_found);
         assert_eq!(probe.detection_method.as_deref(), Some("volume-name"));
+    }
+
+    /// Retire les droits d'un chemin et les remet au drop, même si le test panique.
+    #[cfg(unix)]
+    struct ChmodGuard {
+        path: PathBuf,
+        restore_mode: u32,
+    }
+
+    #[cfg(unix)]
+    impl ChmodGuard {
+        fn lock(path: &Path, restore_mode: u32) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+            Self { path: path.to_path_buf(), restore_mode }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ChmodGuard {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(self.restore_mode));
+        }
+    }
+
+    /// Simule le piège sandbox : `.md` existe (`stat` OK) mais sa lecture est refusée.
+    #[cfg(unix)]
+    #[test]
+    fn probe_reports_access_required_when_marker_unreadable() {
+        let root = TempDir::new("storybox-probe-unreadable");
+        let mount = root.path().join("STORYBOX");
+        fs::create_dir_all(mount.join(".content").join("A1B2C3D4")).unwrap();
+        let md = mount.join(".md");
+        fs::write(&md, b"marker").unwrap();
+
+        {
+            let _locked = ChmodGuard::lock(&md, 0o644);
+            if fs::read(&md).is_ok() {
+                eprintln!("exécuté en root : chmod 000 n'empêche pas la lecture, test non significatif");
+                return;
+            }
+            assert!(md.exists(), "le stat doit rester possible");
+
+            let probe = connected_probe(root.path());
+            assert_eq!(probe.state, DeviceState::AccessRequired);
+            assert!(!probe.connected);
+            assert_eq!(probe.mount, Some(mount.to_string_lossy().into_owned()));
+            assert!(probe.marker_found);
+            assert_eq!(probe.device_id, None);
+            assert_eq!(probe.story_dir_count, 0);
+
+            // Même verdict par la sonde directe d'un montage connu.
+            assert_eq!(probe_mount(&mount).state, DeviceState::AccessRequired);
+        }
+
+        // Droits remis : la même boîte redevient « connectée ».
+        assert!(fs::read(&md).is_ok(), "les droits de .md doivent être restaurés");
+        let probe = connected_probe(root.path());
+        assert_eq!(probe.state, DeviceState::Connected);
+        assert!(probe.connected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_reports_access_required_when_named_volume_unreadable() {
+        let root = TempDir::new("storybox-probe-name-unreadable");
+        let mount = root.path().join("MA STORYBOX");
+        fs::create_dir_all(&mount).unwrap();
+        {
+            let _locked = ChmodGuard::lock(&mount, 0o755);
+            if fs::read_dir(&mount).is_ok() {
+                return; // root
+            }
+            let probe = connected_probe(root.path());
+            assert_eq!(probe.state, DeviceState::AccessRequired);
+            assert_eq!(probe.detection_method.as_deref(), Some("volume-name"));
+        }
+        assert!(fs::read_dir(&mount).is_ok(), "les droits du volume doivent être restaurés");
+        assert_eq!(connected_probe(root.path()).state, DeviceState::Connected);
+    }
+
+    #[test]
+    fn probe_mount_reports_disconnected_for_plain_folder() {
+        let root = TempDir::new("storybox-probe-mount-plain");
+        let folder = root.path().join("Musique");
+        fs::create_dir_all(&folder).unwrap();
+        assert_eq!(probe_mount(&folder).state, DeviceState::NotConnected);
+    }
+
+    #[test]
+    fn inventory_uses_given_mount_and_reports_not_connected_without_it() {
+        let none = get_storybox_inventory(None);
+        assert_eq!(none.status, InventoryStatus::NotConnected);
+
+        let root = TempDir::new("storybox-inv-mount");
+        let mount = root.path().join("STORYBOX");
+        fs::create_dir_all(mount.join(".content").join("AABBCCDD")).unwrap();
+        let inv = get_storybox_inventory(Some(&mount.to_string_lossy()));
+        assert_eq!(inv.status, InventoryStatus::Ok);
+        assert_eq!(inv.total_stories, 1);
     }
 
     #[test]

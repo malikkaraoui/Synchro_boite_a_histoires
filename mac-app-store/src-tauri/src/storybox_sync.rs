@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 
 use crate::storybox_device::{InventoryStatus, StoryBoxInventoryResult};
 
-const AUDIO_EXTENSIONS: &[&str] = &["mp3", "m4a", "wav", "ogg", "flac"];
+/// Formats listés : ceux que l'import sait envoyer. MP3 seul tant que le WAV n'est pas converti
+/// (prévu en M0005) — lister un format refusé à l'import ferait échouer la synchro.
+const AUDIO_EXTENSIONS: &[&str] = &["mp3"];
 
 /// Informations d'espace disque d'un volume monté.
 #[derive(Debug, Clone, Serialize)]
@@ -346,15 +348,17 @@ mod tests {
     }
 
     #[test]
-    fn scan_detects_all_audio_extensions() {
+    fn scan_lists_only_importable_mp3() {
         let tmp = TempDir::new("storybox-sync-ext");
-        for ext in ["mp3", "m4a", "wav", "ogg", "flac"] {
-            fs::write(tmp.path.join(format!("file.{ext}")), b"data").unwrap();
+        for (i, ext) in ["mp3", "MP3", "m4a", "wav", "ogg", "flac"].iter().enumerate() {
+            fs::write(tmp.path.join(format!("file{i}.{ext}")), b"data").unwrap();
         }
         fs::write(tmp.path.join("file.pdf"), b"data").unwrap();
 
         let files = scan_audio_folder(&tmp.path.to_string_lossy()).unwrap();
-        assert_eq!(files.len(), 5);
+        let mut names: Vec<_> = files.iter().map(|f| f.filename.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["file0.mp3", "file1.MP3"]);
     }
 
     #[test]

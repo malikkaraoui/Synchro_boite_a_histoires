@@ -2980,6 +2980,8 @@ dependencies = [
  "chrono",
  "hex",
  "libc",
+ "objc2",
+ "objc2-foundation",
  "png 0.17.16",
  "serde",
  "serde_json",
