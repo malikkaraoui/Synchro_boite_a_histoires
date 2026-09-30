@@ -40,6 +40,13 @@ Exemple (à supprimer à la première entrée réelle) :
 - Réserve non bloquante : <réserve nommée, ou « aucune »>.
 -->
 
+## 2026-09-30T14:24:38+0200 — M0003 (F01) : socle App Store vert (46/46, build release), audit G1–G10 + E1–E11 livré
+
+- Rapport : `vault/echanges/archive/2026-09-30-F01-M0003-appstore-rust-socle-et-audit.md` ; audit `vault/revues/2026-09-30-M0003-audit-app-store.md`.
+- Poussé : `chore/M0002-harnais-storybox`=a9cb2f3, `feat/M0003-appstore-rust`=a809030 (vérifié refs origin). Non mergé : doublage R001 à faire.
+- Bloquants mesurés : G2 sandbox (lecture/écriture boîte EPERM, faux positif « connectée »), E1 build App Store cassé (feature supprimée encore citée), G7 aucun certificat Distribution.
+- Leçon : l'hypothèse orchestrateur de M0002 sur les droits (`commit --only`) était fausse — cause du STOP M0002.
+
 ## 2026-09-30T12:54:15+0200 — M0001 (F01) : superviseur activé pour synchro-boite, config complétée
 
 - Rapport : `vault/echanges/archive/2026-09-30-F01-M0001-activation-superviseur.md`. Aucun git (dérogation voulue).

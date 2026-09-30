@@ -54,7 +54,12 @@ La variante directe (`src-tauri/` + `boite-bridge.py`) n'est pas touchée par ce
 Chaque mandat : branche dédiée → doublage R0xx → merge.
 
 ## Questions ouvertes (au fondateur, non tranchées ici)
-- Q1 (G3) identifiant de bundle définitif ? (ex. `com.malikkaraoui.synchro-boite-a-histoires`)
-- Q2 (G6) v1 App Store = boîtes V2 seulement, ou V3 obligatoire ?
-- Q3 (G7) compte Apple Developer actif ? fiche App Store Connect existante ?
-- Q4 (G4) MP3 seulement en v1, ou aussi m4a/wav/ogg/flac ?
+- ~~Q1 (G3)~~ **TRANCHÉ 2026-09-30 13:52 (fondateur) : `com.malikkaraoui.synchro-boite-a-histoires`** — « je valide »
+- ~~Q2 (G6)~~ **TRANCHÉ 2026-09-30 14:23 (fondateur) : V3 OBLIGATOIRE en v1** (« si un parent a une boîte V3, il doit pouvoir utiliser la v1 » = OUI). Boîte V3 physique disponible pour le fondateur **la semaine du 2026-10-05**.
+  - Faits [VÉRIFIÉ, `StoryBox.QT/pkg/api/device_storybox.py` l. 140-290, implémentation de référence] :
+    - `.md` v6 : `bt` = `md[0x40..0x60]`, clés « fake story » dérivées de la partie claire (SNU) → **aucune action utilisateur**.
+    - `.md` v7 : `story_key = reverse(md[0x40..0x50])`, `story_iv = reverse(md[0x50..0x60])`, `bt` = hex(SNU)+10×0x00+hex(SNU)[:8] → **aucune action utilisateur**.
+    - `.md` v8+ (« unsupported ») : import possible seulement avec une sauvegarde `.md` v6/v7 antérieure de la même boîte, ou un fichier de clés réelles `<SNU>.keys` fourni de l'extérieur ; sinon « no keys at all, unable to import ». → **risque : certaines V3 récentes impossibles sans manipulation**. À mesurer sur la boîte réelle (lire `md[0]`).
+  - `NATIVE_IMPORT.md` ne documente que la v7 : la v6 (`load_md_fakestory_keys`) est à porter aussi.
+- ~~Q3 (G7)~~ **RÉPONDU 2026-09-30 13:52 (fondateur) : compte Apple Developer actif ; aucune fiche App Store Connect créée pour cette app.**
+- ~~Q4 (G4)~~ **TRANCHÉ 2026-09-30 13:49 (fondateur, verbatim) : « MP3 ou WAV »** → v1 accepte MP3 et WAV ; WAV implique une conversion native vers le format lu par la boîte (à spécifier après l'audit G4 de M0003).
