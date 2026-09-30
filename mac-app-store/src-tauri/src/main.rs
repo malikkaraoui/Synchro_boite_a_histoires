@@ -19,6 +19,26 @@ use storybox_device::{
 use storybox_sync::{AudioFile, StorageInfo, SyncPlan};
 use tauri::{Emitter, Manager, State};
 
+// ── Exclusion des écritures sur la boîte (R004 R4-2) ─────────────────────────
+
+/// Une seule opération qui écrit sur la boîte à la fois : synchro, suppression, réparation de
+/// l'index, réordonnancement. Une seconde est refusée tout de suite, sans attendre.
+#[derive(Default)]
+struct DeviceWriteLock(std::sync::Mutex<()>);
+
+const DEVICE_BUSY: &str = "Une autre opération est en cours sur la boîte (synchronisation ou réparation). Attendez qu'elle se termine, puis réessayez.";
+
+/// Exécute `op` en tenant le verrou, ou refuse aussitôt s'il est déjà pris.
+fn exclusive<T>(lock: &DeviceWriteLock, op: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let _guard = match lock.0.try_lock() {
+        Ok(guard) => guard,
+        // Un détenteur a paniqué : `()` n'a rien à protéger, le verrou reste utilisable.
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return Err(DEVICE_BUSY.to_string()),
+    };
+    op()
+}
+
 // ── Commandes device ──────────────────────────────────────────────────────────
 
 /// Détection. Une boîte déjà validée est resondée seule ; sinon on cherche dans `/Volumes`
@@ -263,6 +283,7 @@ fn scan_and_plan(access: State<'_, SandboxAccess>, folder_path: String) -> Resul
 #[tauri::command]
 fn write_sidecar_after_push(
     access: State<'_, SandboxAccess>,
+    lock: State<'_, DeviceWriteLock>,
     mount: String,
     device_id: String,
     short_uuid: String,
@@ -270,42 +291,45 @@ fn write_sidecar_after_push(
     hash: String,
 ) -> Result<(), String> {
     access.require_mount(&mount, &device_id)?;
-    storybox_sync::write_sidecar(&mount, &short_uuid, &story_id, &hash)
+    exclusive(&lock, || storybox_sync::write_sidecar(&mount, &short_uuid, &story_id, &hash))
 }
 
 #[tauri::command]
 fn remove_orphan_story(
     access: State<'_, SandboxAccess>,
+    lock: State<'_, DeviceWriteLock>,
     mount: String,
     device_id: String,
     short_uuid: String,
 ) -> Result<(), String> {
     access.require_mount(&mount, &device_id)?;
-    storybox_sync::remove_orphan_story(&mount, &short_uuid)
+    exclusive(&lock, || storybox_sync::remove_orphan_story(&mount, &short_uuid))
 }
 
 #[tauri::command]
 fn move_story_in_pack_index(
     access: State<'_, SandboxAccess>,
+    lock: State<'_, DeviceWriteLock>,
     mount: String,
     device_id: String,
     short_uuid: String,
     direction: i32,
 ) -> Result<(), String> {
     access.require_mount(&mount, &device_id)?;
-    storybox_device::move_story_in_pack_index(&mount, &short_uuid, direction)
+    exclusive(&lock, || storybox_device::move_story_in_pack_index(&mount, &short_uuid, direction))
 }
 
 #[tauri::command]
 fn reorder_story_in_pack_index(
     access: State<'_, SandboxAccess>,
+    lock: State<'_, DeviceWriteLock>,
     mount: String,
     device_id: String,
     short_uuid: String,
     new_index: usize,
 ) -> Result<(), String> {
     access.require_mount(&mount, &device_id)?;
-    storybox_device::reorder_story_in_pack_index(&mount, &short_uuid, new_index)
+    exclusive(&lock, || storybox_device::reorder_story_in_pack_index(&mount, &short_uuid, new_index))
 }
 
 // ── Réglages persistants ──────────────────────────────────────────────────────
@@ -380,6 +404,7 @@ async fn eject_device(mount: String) -> Result<(), String> {
 async fn start_sync(
     app: tauri::AppHandle,
     access: State<'_, SandboxAccess>,
+    lock: State<'_, DeviceWriteLock>,
     folder_path: String,
     device_mount: String,
     device_id: String,
@@ -387,6 +412,17 @@ async fn start_sync(
 ) -> Result<String, String> {
     let _ = folder_path;
     access.require_mount(&device_mount, &device_id)?;
+    exclusive(&lock, || sync_files(&app, &access, &device_mount, &device_id, &selected_files))
+}
+
+/// Corps de `start_sync`, appelé verrou tenu.
+fn sync_files(
+    app: &tauri::AppHandle,
+    access: &SandboxAccess,
+    device_mount: &str,
+    device_id: &str,
+    selected_files: &[String],
+) -> Result<String, String> {
     let total = selected_files.len();
     emit_sync_line(&app, serde_json::json!({
         "type": "progress", "step": "scan",
@@ -487,11 +523,12 @@ fn emit_sync_line(app: &tauri::AppHandle, payload: serde_json::Value) {
 #[tauri::command]
 async fn repair_pack_index(
     access: State<'_, SandboxAccess>,
+    lock: State<'_, DeviceWriteLock>,
     device_mount: String,
     device_id: String,
 ) -> Result<storybox_device::PackIndexRepair, String> {
     access.require_mount(&device_mount, &device_id)?;
-    storybox_import::repair_pack_index(&device_mount)
+    exclusive(&lock, || storybox_import::repair_pack_index(&device_mount))
 }
 
 // ── Canal de distribution + mise à jour (App Store gère via le Store) ─────────
@@ -525,6 +562,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(SandboxAccess::default())
+        .manage(DeviceWriteLock::default())
         .invoke_handler(tauri::generate_handler![
             probe_storybox_device,
             grant_device_access,
@@ -563,6 +601,58 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::mpsc;
+
+    /// R004 P4 rendu impossible : pendant un import arrêté entre le remplacement et l'index
+    /// (ancienne histoire en `.old`), une réparation concurrente est refusée sans rien toucher,
+    /// puis l'import se termine normalement.
+    #[test]
+    fn concurrent_repair_is_refused_while_an_import_holds_the_lock() {
+        let mount = tempfile::tempdir().unwrap();
+        let content = mount.path().join(".content");
+        fs::create_dir_all(content.join("89ABCDEF")).unwrap();
+        for f in ["ni", "li", "ri", "si", "bt"] {
+            fs::write(content.join("89ABCDEF").join(f), b"ancienne").unwrap();
+        }
+        let mount_str = mount.path().to_str().unwrap();
+        let lock = &DeviceWriteLock::default();
+        let (paused_tx, paused_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel::<()>();
+
+        std::thread::scope(|scope| {
+            let import = scope.spawn(move || {
+                exclusive(lock, || {
+                    let on_progress = |m: &str| {
+                        if m.starts_with("Mise à jour de l'index") {
+                            paused_tx.send(()).unwrap();
+                            resume_rx.recv().unwrap();
+                        }
+                    };
+                    storybox_import::install_story(mount_str, "89ABCDEF", "id", "h", &on_progress, |dir| {
+                        for f in ["ni", "li", "ri", "si", "bt"] {
+                            fs::write(dir.join(f), b"nouvelle").map_err(|e| e.to_string())?;
+                        }
+                        Ok(())
+                    })
+                })
+            });
+
+            paused_rx.recv().unwrap();
+            assert!(content.join(".89ABCDEF.old").is_dir(), "import arrêté au point critique de P4");
+            let repair = exclusive(lock, || storybox_import::repair_pack_index(mount_str));
+            assert_eq!(repair.unwrap_err(), DEVICE_BUSY);
+            assert!(content.join(".89ABCDEF.old").is_dir(), "la réparation refusée n'a rien touché");
+            resume_tx.send(()).unwrap();
+
+            assert_eq!(import.join().unwrap().unwrap().short_uuid, "89ABCDEF");
+        });
+        assert_eq!(fs::read(content.join("89ABCDEF/ni")).unwrap(), b"nouvelle");
+        assert!(!content.join(".89ABCDEF.old").exists());
+        assert!(exclusive(lock, || storybox_import::repair_pack_index(mount_str)).is_ok(), "verrou rendu");
+    }
+
     #[test]
     fn first_occurrence_is_true_once_per_message() {
         assert!(super::first_occurrence("test : bookmark A non résolu"));

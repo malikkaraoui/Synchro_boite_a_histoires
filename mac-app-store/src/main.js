@@ -1066,6 +1066,7 @@ async function startSync() {
 
   syncing = true;
   $syncBtn.disabled = true;
+  $repairBtn.disabled = true; // exclusion aussi garantie côté Rust (DeviceWriteLock)
   $syncBtn.classList.add("syncing");
   $syncBtn.querySelector(".btn-icon").textContent = "⟳";
   _importLines.clear();
@@ -1116,6 +1117,7 @@ async function startSync() {
   } finally {
     unlisten();
     syncing = false;
+    $repairBtn.disabled = false;
     $syncBtn.classList.remove("syncing");
     $syncBtn.querySelector(".btn-icon").textContent = "↺";
     updateSyncButton();
@@ -1255,7 +1257,7 @@ $repairBtn.addEventListener("click", async () => {
     "Pour réordonner, utilisez le glisser-déposer dans la liste.",
     { title: "Réparer l'index de la boîte ?", kind: "warning", okLabel: "Réparer", cancelLabel: "Annuler" }
   );
-  if (!confirmed) return;
+  if (!confirmed || syncing) return; // une synchro a pu démarrer pendant la confirmation
 
   $repairBtn.disabled = true;
   $repairBtn.title = "Réparation en cours…";
