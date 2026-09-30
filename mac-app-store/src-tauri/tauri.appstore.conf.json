@@ -1,5 +1,5 @@
 {
-  "identifier": "com.malikkaraoui.synchro_boite_a_histoires",
+  "identifier": "com.malikkaraoui.synchro-boite-a-histoires",
   "bundle": {
     "targets": ["app"],
     "category": "Utility",
@@ -9,11 +9,8 @@
       "minimumSystemVersion": "12.0",
       "entitlements": "../boite-app-store.entitlements",
       "files": {
-        "../PrivacyInfo.xcprivacy": "PrivacyInfo.xcprivacy"
+        "Resources/PrivacyInfo.xcprivacy": "../PrivacyInfo.xcprivacy"
       }
     }
-  },
-  "build": {
-    "features": ["mac-app-store"]
   }
 }

@@ -239,12 +239,13 @@ async fn start_sync(
         }
 
         match result {
-            Ok(_) => {
+            Ok(imported) => {
                 added += 1;
                 emit_sync_line(&app, serde_json::json!({
                     "type": "progress", "step": "import",
                     "file": display,
-                    "message": format!("✓ {display}")
+                    "shortUuid": imported.short_uuid,
+                    "message": format!("✓ {display} ({})", imported.short_uuid)
                 }));
             }
             Err(e) => {

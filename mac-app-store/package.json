@@ -7,11 +7,9 @@
     "build":          "tauri build",
     "build:mac-app-store": "tauri build --bundles app --target universal-apple-darwin --config src-tauri/tauri.appstore.conf.json",
     "tauri":          "tauri",
-    "check:python":   "python3 -m py_compile boite-bridge.py boite-app.py boite-push.py",
     "check:rust":     "cd src-tauri && cargo check",
-    "check:rust:mac-app-store": "cd src-tauri && cargo check --features mac-app-store",
     "test:rust":      "cd src-tauri && cargo test",
-    "verify":         "npm run check:python && npm run check:rust"
+    "verify":         "npm run check:rust && npm run test:rust"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0"
