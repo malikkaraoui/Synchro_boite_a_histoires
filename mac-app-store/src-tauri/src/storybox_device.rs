@@ -431,7 +431,27 @@ pub fn reorder_story_in_pack_index(
     write_all_pack_index_entries(mount_path, &visible_entries, &hidden_entries)
 }
 
-pub fn repair_pack_index_native(mount: &str) -> Result<(), String> {
+/// Fichiers sans lesquels une histoire est illisible : un dossier qui en manque un n'est
+/// jamais indexé (import interrompu, copie partielle).
+const REQUIRED_STORY_FILES: [&str; 5] = ["ni", "li", "ri", "si", "bt"];
+
+fn is_complete_story_dir(story_dir: &Path) -> bool {
+    REQUIRED_STORY_FILES.iter().all(|f| story_dir.join(f).is_file())
+}
+
+/// Résultat de la réparation de `.pi`.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PackIndexRepair {
+    /// Histoires indexées (`.pi` et `.pi.hidden`).
+    pub indexed: usize,
+    /// Dossiers `.content/<SHORT>` incomplets : non indexés, jamais supprimés automatiquement.
+    pub incomplete: Vec<String>,
+}
+
+/// Reconstruit `.pi` depuis les dossiers **complets** de `.content/`, en gardant l'ordre
+/// existant et `.pi.hidden`. Format des entrées inchangé (UUID court, cf. NATIVE_IMPORT.md).
+pub fn repair_pack_index_native(mount: &str) -> Result<PackIndexRepair, String> {
     let mount_path = Path::new(mount);
     if !mount_path.is_dir() {
         return Err(format!("Montage boîte à histoires introuvable : {mount}"));
@@ -442,7 +462,10 @@ pub fn repair_pack_index_native(mount: &str) -> Result<(), String> {
         return Err("Dossier .content introuvable sur la boîte".to_string());
     }
 
-    let content_short_uuids = collect_content_short_uuids(&content_dir)?;
+    let (content_short_uuids, incomplete): (Vec<String>, Vec<String>) =
+        collect_content_short_uuids(&content_dir)?
+            .into_iter()
+            .partition(|short_uuid| is_complete_story_dir(&content_dir.join(short_uuid)));
     let known_short_uuids: HashSet<String> = content_short_uuids.iter().cloned().collect();
 
     let visible_entries = read_pack_index_entries(&mount_path.join(".pi")).unwrap_or_default();
@@ -474,7 +497,11 @@ pub fn repair_pack_index_native(mount: &str) -> Result<(), String> {
         .map(|short_uuid| short_uuid_to_uuid_bytes(short_uuid))
         .collect::<Result<Vec<_>, _>>()?;
 
-    write_all_pack_index_entries(mount_path, &visible_uuid_entries, &hidden_uuid_entries)
+    write_all_pack_index_entries(mount_path, &visible_uuid_entries, &hidden_uuid_entries)?;
+    Ok(PackIndexRepair {
+        indexed: visible_uuid_entries.len() + hidden_uuid_entries.len(),
+        incomplete,
+    })
 }
 
 pub fn move_story_in_pack_index(mount: &str, short_uuid: &str, direction: i32) -> Result<(), String> {
@@ -1238,13 +1265,21 @@ mod tests {
         assert_eq!(hidden_order, vec!["99AABBCC"]);
     }
 
+    /// Dossier d'histoire complet (`ni`, `li`, `ri`, `si`, `bt`).
+    fn make_complete_story(story_dir: &Path) {
+        fs::create_dir_all(story_dir).unwrap();
+        for f in ["ni", "li", "ri", "si", "bt"] {
+            fs::write(story_dir.join(f), b"x").unwrap();
+        }
+    }
+
     #[test]
     fn repair_pack_index_rebuilds_visible_entries_from_content_and_preserves_hidden() {
         let root = TempDir::new("storybox-repair-index");
         let mount = root.path().join("STORYBOX");
-        fs::create_dir_all(mount.join(".content").join("11223344")).unwrap();
-        fs::create_dir_all(mount.join(".content").join("AABBCCDD")).unwrap();
-        fs::create_dir_all(mount.join(".content").join("55667788")).unwrap();
+        make_complete_story(&mount.join(".content").join("11223344"));
+        make_complete_story(&mount.join(".content").join("AABBCCDD"));
+        make_complete_story(&mount.join(".content").join("55667788"));
 
         let mut visible = [0u8; 16];
         visible[12..].copy_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
@@ -1275,9 +1310,9 @@ mod tests {
     fn repair_pack_index_ignores_missing_and_invalid_existing_entries() {
         let root = TempDir::new("storybox-repair-index-invalid");
         let mount = root.path().join("STORYBOX");
-        fs::create_dir_all(mount.join(".content").join("CAFEBABE")).unwrap();
-        fs::create_dir_all(mount.join(".content").join("DEADBEEF")).unwrap();
-        fs::create_dir_all(mount.join(".content").join("bonjour")).unwrap();
+        make_complete_story(&mount.join(".content").join("CAFEBABE"));
+        make_complete_story(&mount.join(".content").join("DEADBEEF"));
+        make_complete_story(&mount.join(".content").join("bonjour"));
 
         let mut stale = [0u8; 16];
         stale[12..].copy_from_slice(&[0x00, 0x00, 0x00, 0x01]);
@@ -1305,11 +1340,7 @@ mod tests {
         let root = TempDir::new("storybox-hidden-dirs");
         let mount = root.path().join("STORYBOX");
         for dir in ["AABBCCDD", ".11223344.tmp", ".AABBCCDD.old"] {
-            let story = mount.join(".content").join(dir);
-            fs::create_dir_all(&story).unwrap();
-            for f in ["ni", "li", "ri", "si", "bt"] {
-                fs::write(story.join(f), b"x").unwrap();
-            }
+            make_complete_story(&mount.join(".content").join(dir));
         }
 
         let inv = read_inventory(&mount).unwrap();
@@ -1321,6 +1352,37 @@ mod tests {
         let pi = super::read_pack_index_entries(&mount.join(".pi")).unwrap();
         let order: Vec<_> = pi.iter().map(super::short_uuid_from_uuid_bytes).collect();
         assert_eq!(order, vec!["AABBCCDD"]);
+    }
+
+    #[test]
+    fn repair_pack_index_skips_and_reports_incomplete_story_dirs() {
+        let root = TempDir::new("storybox-repair-incomplete");
+        let mount = root.path().join("STORYBOX");
+        let content = mount.join(".content");
+        make_complete_story(&content.join("AABBCCDD"));
+        // Import interrompu : `bt` manquant ; dossier vide ; complet mais sans `si`.
+        make_complete_story(&content.join("11223344"));
+        fs::remove_file(content.join("11223344").join("bt")).unwrap();
+        fs::create_dir_all(content.join("55667788")).unwrap();
+        make_complete_story(&content.join("99AABBCC"));
+        fs::remove_file(content.join("99AABBCC").join("si")).unwrap();
+        // Un dossier incomplet déjà présent dans `.pi` en sort aussi.
+        let mut stale = [0u8; 16];
+        stale[12..].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+        write_pack_index_entries(&mount.join(".pi"), &[stale]).unwrap();
+
+        let report = repair_pack_index_native(&mount.to_string_lossy()).unwrap();
+        assert_eq!(report.indexed, 1);
+        assert_eq!(report.incomplete, vec!["11223344", "55667788", "99AABBCC"]);
+
+        let pi = super::read_pack_index_entries(&mount.join(".pi")).unwrap();
+        let order: Vec<_> = pi.iter().map(super::short_uuid_from_uuid_bytes).collect();
+        assert_eq!(order, vec!["AABBCCDD"], "seul le dossier complet est indexé");
+        // Jamais supprimés automatiquement
+        for dir in ["11223344", "55667788", "99AABBCC"] {
+            assert!(content.join(dir).is_dir(), "{dir} doit rester sur la boîte");
+        }
+        assert!(content.join("11223344").join("ni").is_file());
     }
 
     #[test]

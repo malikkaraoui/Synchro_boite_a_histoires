@@ -332,7 +332,14 @@ pub(crate) fn install_story(
     on_progress("Mise à jour de l'index…");
     let pack_index = storybox_device::PackIndexSnapshot::take(Path::new(mount));
     match storybox_device::repair_pack_index_native(mount) {
-        Ok(()) => {}
+        Ok(report) => {
+            if !report.incomplete.is_empty() {
+                on_progress(&format!(
+                    "⚠ Dossier(s) incomplet(s) non indexé(s), laissé(s) sur la boîte : {}",
+                    report.incomplete.join(", ")
+                ));
+            }
+        }
         Err(e) => {
             let mut err = format!("Mise à jour index échouée : {e}");
             err = with_cleanup(err, pack_index.restore(), "restauration de .pi");

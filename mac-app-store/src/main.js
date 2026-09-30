@@ -1248,6 +1248,8 @@ $repairBtn.addEventListener("click", async () => {
     "  • Un import s'est interrompu (crash, déconnexion)\n" +
     "  • Des fichiers ont été copiés manuellement via le Finder\n" +
     "  • L'index semble corrompu ou incomplet\n\n" +
+    "Seules les histoires complètes sont indexées ; les dossiers incomplets\n" +
+    "sont signalés dans le journal, jamais supprimés.\n\n" +
     "⚠️ Cette action NE change PAS l'ordre des histoires.\n" +
     "Pour réordonner, utilisez le glisser-déposer dans la liste.",
     { title: "Réparer l'index de la boîte ?", kind: "warning", okLabel: "Réparer", cancelLabel: "Annuler" }
@@ -1261,10 +1263,13 @@ $repairBtn.addEventListener("click", async () => {
     : "Réparation de l'index en cours…");
   $logDrawer.classList.remove("hidden");
   try {
-    await invoke("repair_pack_index", { deviceMount, deviceId });
+    const report = await invoke("repair_pack_index", { deviceMount, deviceId });
     log("ok", isMacAppStoreChannel()
-      ? "Index réparé nativement — redémarre la boîte à histoires pour voir les histoires."
-      : "Index réparé — redémarre la boîte à histoires pour voir les histoires.");
+      ? `Index réparé nativement (${report.indexed} histoire(s)) — redémarre la boîte à histoires pour voir les histoires.`
+      : `Index réparé (${report.indexed} histoire(s)) — redémarre la boîte à histoires pour voir les histoires.`);
+    if (report.incomplete.length > 0) {
+      log("err", `${report.incomplete.length} dossier(s) incomplet(s) non indexé(s), laissé(s) sur la boîte : ${report.incomplete.join(", ")}`);
+    }
   } catch (e) {
     log("err", `Réparation échouée : ${e}`);
   } finally {
