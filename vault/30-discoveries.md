@@ -115,3 +115,22 @@
 - **Découverte** : la méthode `NSURL::bookmarkDataWithOptions_includingResourceValuesForKeys_relativeToURL_error` n'existe qu'avec les features `NSArray` + `NSData` + `NSError` + `NSString`. L'app compilait sans `NSArray` déclarée uniquement parce que Tauri l'active (unification de features) ; la sonde autonome, elle, a échoué (`E0599`).
 - **Impact** : `NSArray` est déclarée explicitement dans `mac-app-store/src-tauri/Cargo.toml`, pour ne pas dépendre des features activées par une autre crate.
 - **Source** : `objc2-foundation-0.3.2/src/generated/NSURL.rs:1449-1458`, compilation de la sonde M0004
+
+### 2026-09-30 · `ni[24]` vaut 0 dans tout import réel (hypothèse firmware V3 non tranchée)
+
+- **Découverte** : l'app écrit l'octet 24 de `ni` depuis `nightModeAvailable`, que `generate_simple_pack` met **toujours** à `false` ; la référence StoryBox.QT code `1` en dur (`stories.py::get_ni_data`). Tout import réel diffère donc de la référence sur cet octet. L'identité « octet pour octet » affirmée en M0005 ne valait que pour un vecteur de test en mode nuit.
+- **Statut** : correctif V2 volontaire, validé sur boîte V2 (entrée 2026-06-03, bug n° 1) ; **jamais validé en V3**. Non modifié en M0006 : le test physique V3 tranche (`xxd -l 32 ni` d'une histoire officielle, octet 24 — protocole de `mac-app-store/NATIVE_IMPORT.md`).
+- **Leçon (transverse, R1)** : un vecteur de bout en bout ne prouve l'identité que pour les options qu'il exerce ; choisir les vecteurs d'après ce que le code appelant génère réellement.
+- **Source** : doublage R002 (`vault/revues/2026-09-30-R002-doublage-M0005-v3.md`, axe A), `storybox_import.rs::generate_simple_pack`
+
+### 2026-09-30 · `.pi` est entièrement réécrit en UUID court à chaque import ou réparation
+
+- **Découverte** : `repair_pack_index_native` (appelé par chaque import) réécrit **toutes** les entrées de `.pi`, y compris celles des histoires officielles, en 12 octets nuls + 4 octets (`11223344556677889900aabbaabbccdd` → `000000000000000000000000aabbccdd`). La référence écrit l'UUID complet.
+- **Statut** : validé en V2 (import du 2026-06-03) ; **jamais validé en V3** — si le firmware V3 compare l'UUID complet, un import pourrait retirer du menu toutes les histoires officielles. Format **non modifié** en M0006 (décision après test physique). Le protocole V3 exige désormais `xxd .pi` avant/après et qu'une histoire officielle se lise encore ; le retour arrière restaure toujours `.pi` sauvegardé.
+- **Source** : doublage R002 (axe D, écart 1), `storybox_device.rs::repair_pack_index_native`
+
+### 2026-09-30 · Réimport destructif corrigé : écriture en transit puis remplacement
+
+- **Découverte** : avant M0006, `import_story` (V2) et `import_story_v3` supprimaient `.content/<S>/` **avant** d'écrire la nouvelle version ; un échec d'écriture (boîte pleine, E/S, débranchement) détruisait l'histoire existante et laissait une entrée orpheline dans `.pi`. L'UUID étant dérivé du nom du fichier, c'est le cas nominal d'une mise à jour. Mesuré par R002 (14 entrées supprimées).
+- **Correctif (M0006)** : `install_story` écrit dans `.content/.<S>.tmp/` (sidecar compris), puis `<S>` → `.<S>.old`, `.<S>.tmp` → `<S>`, index, suppression de `.old`. Échec d'écriture : boîte identique (instantané complet, V2/v6/v7) ; échec d'index : `.pi` et ancienne histoire restaurés ; restes d'un import interrompu nettoyés (ou `.old` restauré) au début de l'import suivant ; dossiers cachés ignorés par inventaire, comptage et index. Contre-épreuve : réintroduire l'effacement préalable fait échouer les tests.
+- **Source** : `mac-app-store/src-tauri/src/storybox_import.rs::install_story`, tests `failed_reimport_leaves_box_identical_v2_and_v3`, `index_failure_restores_previous_story_and_pack_index`, `interrupted_import_leftovers_are_cleaned`
