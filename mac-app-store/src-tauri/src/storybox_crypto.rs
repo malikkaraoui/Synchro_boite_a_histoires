@@ -129,6 +129,31 @@ pub fn make_bt_v2(ri_data: &[u8], device_key: &[u32; 4]) -> Vec<u8> {
     cipher_leading_bytes(&input, device_key, 64)
 }
 
+/// Chiffre un fichier story pour une boîte V3 : AES-128-CBC sur les 512 premiers octets.
+///
+/// Réplique exacte de StoryBox.QT `aes_cipher(buffer, key, iv, 0, 512)` :
+/// - `enc_len = min(512, len)` ; les octets au-delà restent en clair ;
+/// - si `enc_len` n'est pas multiple de 16 (seulement possible si `len < 512`), le buffer
+///   est complété par des `0x00` jusqu'au multiple de 16 suivant : le fichier grandit ;
+/// - pas de padding PKCS : CBC brut, IV réinitialisé pour chaque fichier.
+pub fn cipher_story_data_v3(data: &[u8], key: &[u8; 16], iv: &[u8; 16]) -> Vec<u8> {
+    use aes::cipher::{block_padding::NoPadding, BlockEncryptMut, KeyIvInit};
+
+    let mut buf = data.to_vec();
+    let mut enc_len = buf.len().min(512);
+    if enc_len % 16 != 0 {
+        let pad = 16 - buf.len() % 16;
+        buf.resize(buf.len() + pad, 0);
+        enc_len += pad;
+    }
+    if enc_len > 0 {
+        cbc::Encryptor::<aes::Aes128>::new(key.into(), iv.into())
+            .encrypt_padded_mut::<NoPadding>(&mut buf[..enc_len], enc_len)
+            .expect("enc_len est un multiple de 16 : NoPadding ne peut pas échouer");
+    }
+    buf
+}
+
 /// Dérive la device key d'un appareil boîte à histoires V2 depuis le contenu binaire du fichier `.md`.
 ///
 /// Algorithme (StoryBox.QT `__md1to5_parse`) :
@@ -159,7 +184,7 @@ pub fn derive_v2_device_key(md_data: &[u8]) -> Result<[u32; 4], String> {
 
 /// Retourne la version hardware boîte à histoires depuis l'octet 0 du fichier `.md`.
 /// - md_version < 6 → V2 (XXTEA)
-/// - md_version >= 6 → V3 (AES-128-CBC, non supporté dans cette variante)
+/// - md_version >= 6 → V3 (AES-128-CBC, voir `storybox_v3` : v6/v7 supportés, v8+ refusé)
 pub fn md_hw_version(md_data: &[u8]) -> u8 {
     if md_data.is_empty() {
         return 0;

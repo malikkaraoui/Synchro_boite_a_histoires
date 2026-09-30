@@ -200,11 +200,9 @@ pub fn import_story(
         .map_err(|e| format!("Fichier .md boîte à histoires introuvable : {e}"))?;
 
     if storybox_crypto::md_hw_version(&md_data) >= 3 {
-        return Err(
-            "boîte à histoires V3 détectée (firmware récent). \
-             Cet appareil utilise AES-128-CBC non encore supporté dans la variante App Store. \
-             Utilisez Synchro Boîte à histoires (distribution directe) pour cet appareil."
-                .to_string(),
+        // V3 : .md v6/v7 → AES-128-CBC ; v8+ → erreur explicite, rien n'est écrit.
+        return crate::storybox_v3::import_story_v3(
+            mount, &md_data, zip_path, story_id, hash, on_progress,
         );
     }
 
