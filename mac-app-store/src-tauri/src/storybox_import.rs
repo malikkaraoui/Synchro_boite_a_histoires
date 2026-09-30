@@ -413,4 +413,177 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("V3"));
     }
+
+    // ── Bout en bout contre StoryBox.QT `import_studio_zip` ──────────────────
+    // Même .md, même story.json, mêmes octets audio/image : les fichiers écrits
+    // par la référence Python sont figés ci-dessous (taille, SHA-256).
+
+    use crate::storybox_v3::test_fixtures::{md_v5, md_v6, md_v7, md_v8, sha256_hex};
+
+    const STORY_JSON: &str = r#"{"format": "v1", "version": 1, "title": "Histoire V3", "description": "", "nightModeAvailable": true, "factoryPack": false, "stageNodes": [{"uuid": "12345678-9abc-4def-8123-456789abcdef", "squareOne": true, "audio": "histoire.mp3", "image": "image001.bmp", "controlSettings": {"wheel": false, "ok": false, "home": true, "pause": true, "autoplay": true}, "okTransition": null, "homeTransition": null}], "actionNodes": [], "listNodes": []}"#;
+
+    fn pattern(len: usize, a: usize, b: usize) -> Vec<u8> {
+        (0..len).map(|i| ((i * a + b) & 0xFF) as u8).collect()
+    }
+
+    /// Boîte simulée : `.md`, `.content/` vide, et un pack ZIP STUdio hors montage.
+    fn mount_with_pack(md: &[u8]) -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
+        use std::io::Write;
+        let mount = tempfile::tempdir().unwrap();
+        fs::write(mount.path().join(".md"), md).unwrap();
+        fs::create_dir_all(mount.path().join(".content")).unwrap();
+
+        let packs = tempfile::tempdir().unwrap();
+        let zip_path = packs.path().join("story.zip");
+        let mut writer = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        writer.start_file("story.json", opts).unwrap();
+        writer.write_all(STORY_JSON.as_bytes()).unwrap();
+        writer.start_file("assets/histoire.mp3", opts).unwrap();
+        writer.write_all(&pattern(1000, 31, 17)).unwrap();
+        writer.start_file("assets/image001.bmp", opts).unwrap();
+        writer.write_all(&pattern(700, 19, 29)).unwrap();
+        writer.finish().unwrap();
+        (mount, packs, zip_path)
+    }
+
+    /// Tous les fichiers sous `root` : chemin relatif → (taille, SHA-256).
+    fn tree(root: &Path) -> BTreeMap<String, (usize, String)> {
+        fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, (usize, String)>) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(root, &path, out);
+                } else {
+                    let data = fs::read(&path).unwrap();
+                    let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+                    out.insert(rel, (data.len(), sha256_hex(&data)));
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(root, root, &mut out);
+        out
+    }
+
+    fn import(mount: &Path, zip_path: &Path) -> Result<ImportResult, String> {
+        import_story(mount.to_str().unwrap(), zip_path, "histoire-v3", "sha256:abc", &|_| {})
+    }
+
+    const EMPTY_SHA: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    const NI_SHA: &str = "d1087949521203747b57994a023bca1eb1bf0d69cae5b7ee9b07f2d366c983e4";
+    const SIDECAR: &str = "89ABCDEF/.la-forge-a-histoires.json";
+
+    /// Compare l'arborescence écrite aux fichiers produits par la référence.
+    fn assert_matches_reference(mount: &Path, expected: &[(&str, usize, &str)]) {
+        let mut actual = tree(&mount.join(".content"));
+        assert!(actual.remove(SIDECAR).is_some(), "sidecar Synchro absent");
+        let expected: BTreeMap<String, (usize, String)> = expected
+            .iter()
+            .map(|(p, l, h)| (p.to_string(), (*l, h.to_string())))
+            .collect();
+        assert_eq!(actual, expected);
+    }
+
+    /// `.pi` : une entrée de 16 octets pour l'histoire importée.
+    fn assert_pack_index(mount: &Path) {
+        let pi = fs::read(mount.join(".pi")).unwrap();
+        assert_eq!(pi.len(), 16);
+        // Écart connu et antérieur à M0005 (chemin commun V2/V3, storybox_device.rs) :
+        // la référence écrit l'UUID complet 123456789abc4def8123456789abcdef ;
+        // repair_pack_index_native ne garde que les 4 derniers octets (short UUID).
+        assert_eq!(hex::encode(&pi[12..]), "89abcdef");
+    }
+
+    #[test]
+    fn import_v3_md6_matches_reference_end_to_end() {
+        let (mount, _packs, zip_path) = mount_with_pack(&md_v6());
+        let result = import(mount.path(), &zip_path).unwrap();
+        assert_eq!(result.short_uuid, "89ABCDEF");
+        assert_matches_reference(mount.path(), &[
+            ("89ABCDEF/bt", 32, "00e988677eecf94c0bb9233371c7c0d6f4db8ebdcdecb7c5ebaa666f17249227"),
+            ("89ABCDEF/li", 16, "0bfd31847310a1459b78a95227eb16145270de071ba414afd89b73b4d1cfed55"),
+            ("89ABCDEF/ni", 556, NI_SHA),
+            ("89ABCDEF/nm", 0, EMPTY_SHA),
+            ("89ABCDEF/rf/000/IMAGE001", 700, "43a952c90c94606e3a942c209ed3c70fe0a9f2c78fe65740d37bff7e097df39d"),
+            ("89ABCDEF/ri", 16, "ffa810ecaea86365b8002090244dab0d7d83e4dd7c4a2ce6918b80f7d4390f9e"),
+            ("89ABCDEF/sf/000/HISTOIRE", 1000, "25f0ee19873244be4179b268563d5309474a0242b55810e23a65ac99845bce8d"),
+            ("89ABCDEF/si", 16, "325792ed2d6b83a74d07cb6206de9bcf9e01fdcb3332e861e8d5aae8a0901b7e"),
+        ]);
+        assert_pack_index(mount.path());
+        // bt v6 = md[0x40..0x60], en clair
+        let bt = fs::read(mount.path().join(".content/89ABCDEF/bt")).unwrap();
+        assert_eq!(bt, md_v6()[0x40..0x60]);
+        // Au-delà de 512 octets, l'audio reste en clair
+        let audio = fs::read(mount.path().join(".content/89ABCDEF/sf/000/HISTOIRE")).unwrap();
+        assert_eq!(&audio[512..], &pattern(1000, 31, 17)[512..]);
+    }
+
+    #[test]
+    fn import_v3_md7_matches_reference_end_to_end() {
+        let (mount, _packs, zip_path) = mount_with_pack(&md_v7());
+        import(mount.path(), &zip_path).unwrap();
+        assert_matches_reference(mount.path(), &[
+            ("89ABCDEF/bt", 32, "b352a9a2f56327cc35e0f43a5efa6dfb98023d135609f7f7724c3d25a0221e7a"),
+            ("89ABCDEF/li", 16, "6df25c8af0e5f8c42776b1a61a0b31338640b5f6336934e0f983dc0ca1ed3959"),
+            ("89ABCDEF/ni", 556, NI_SHA),
+            ("89ABCDEF/nm", 0, EMPTY_SHA),
+            ("89ABCDEF/rf/000/IMAGE001", 700, "371f8b8e9294bdfbb2af4f38d7b6d2465b319761f6b755c25a2f6ece2403cd33"),
+            ("89ABCDEF/ri", 16, "a3a5c3f618a599131c595e398120051a2ffe0d2698843e5f1ced865a4b941d58"),
+            ("89ABCDEF/sf/000/HISTOIRE", 1000, "90ca86a595df57251c0d43770bf354e2cae425f8e9d8861fe820dcb96cb0c045"),
+            ("89ABCDEF/si", 16, "f5fdb9880f4f4fe2519972444da5448df59d6a3196b7c29c18b7392e5af7b9c0"),
+        ]);
+        assert_pack_index(mount.path());
+    }
+
+    #[test]
+    fn import_v3_md8_is_refused_without_any_write() {
+        let (mount, _packs, zip_path) = mount_with_pack(&md_v8());
+        let before = tree(mount.path());
+        let err = import(mount.path(), &zip_path).unwrap_err();
+        assert!(err.starts_with(crate::storybox_v3::ERR_V3_RECENT), "{err}");
+        assert_eq!(tree(mount.path()), before, "la boîte ne doit pas être modifiée");
+        assert!(!mount.path().join(".pi").exists());
+    }
+
+    #[test]
+    fn import_v3_reimport_replaces_story_dir() {
+        let (mount, _packs, zip_path) = mount_with_pack(&md_v7());
+        import(mount.path(), &zip_path).unwrap();
+        fs::write(mount.path().join(".content/89ABCDEF/sf/000/RESIDU"), b"x").unwrap();
+        import(mount.path(), &zip_path).unwrap();
+        assert!(!mount.path().join(".content/89ABCDEF/sf/000/RESIDU").exists());
+        assert_pack_index(mount.path());
+    }
+
+    #[test]
+    fn import_v2_unchanged_and_matches_reference() {
+        let (mount, _packs, zip_path) = mount_with_pack(&md_v5());
+        import(mount.path(), &zip_path).unwrap();
+        let mut actual = tree(&mount.path().join(".content"));
+        actual.remove(SIDECAR).unwrap();
+        // bt V2 : écart connu et antérieur à M0005 (hors périmètre, non modifié ici).
+        // Référence : 12 octets (252bbd4d…), cipher(ri_chiffré[:64]) sans complément.
+        // Rust : make_bt_v2 complète l'entrée à 64 octets. Valeur actuelle figée.
+        let (bt_len, bt_sha) = actual.remove("89ABCDEF/bt").unwrap();
+        assert_eq!(bt_len, 64);
+        let ri_enc = fs::read(mount.path().join(".content/89ABCDEF/ri")).unwrap();
+        let device_key = storybox_crypto::derive_v2_device_key(&md_v5()).unwrap();
+        assert_eq!(bt_sha, sha256_hex(&storybox_crypto::make_bt_v2(&ri_enc, &device_key)));
+
+        let expected: BTreeMap<String, (usize, String)> = [
+            ("89ABCDEF/li", 8, "6acc15493144806f95815bd6c602d235c8118a756d45dce1e65bbf7e49edb510"),
+            ("89ABCDEF/ni", 556, NI_SHA),
+            ("89ABCDEF/nm", 0, EMPTY_SHA),
+            ("89ABCDEF/rf/000/IMAGE001", 700, "8a092201142e1f18755b6dcc5ea3adf20f4b7c32fc4e954a34b69186a33d89d1"),
+            ("89ABCDEF/ri", 12, "acaec261e616fa2c26284b3b79ffb839eb05741cb64edf54314d2720d63eb4da"),
+            ("89ABCDEF/sf/000/HISTOIRE", 1000, "e74a7959a1aa2257363cb9574b702497f86cd283f0e471f4ec643433fd805cb5"),
+            ("89ABCDEF/si", 12, "51e153185498ea3d6085314ef76661d1c489f132706a061f820d4db9574f66ad"),
+        ]
+        .iter()
+        .map(|(p, l, h)| (p.to_string(), (*l, h.to_string())))
+        .collect();
+        assert_eq!(actual, expected);
+        assert_pack_index(mount.path());
+    }
 }
