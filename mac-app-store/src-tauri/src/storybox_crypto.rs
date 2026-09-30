@@ -129,6 +129,31 @@ pub fn make_bt_v2(ri_data: &[u8], device_key: &[u32; 4]) -> Vec<u8> {
     cipher_leading_bytes(&input, device_key, 64)
 }
 
+/// Chiffre un fichier story pour une boîte V3 : AES-128-CBC sur les 512 premiers octets.
+///
+/// Réplique exacte de StoryBox.QT `aes_cipher(buffer, key, iv, 0, 512)` :
+/// - `enc_len = min(512, len)` ; les octets au-delà restent en clair ;
+/// - si `enc_len` n'est pas multiple de 16 (seulement possible si `len < 512`), le buffer
+///   est complété par des `0x00` jusqu'au multiple de 16 suivant : le fichier grandit ;
+/// - pas de padding PKCS : CBC brut, IV réinitialisé pour chaque fichier.
+pub fn cipher_story_data_v3(data: &[u8], key: &[u8; 16], iv: &[u8; 16]) -> Vec<u8> {
+    use aes::cipher::{block_padding::NoPadding, BlockEncryptMut, KeyIvInit};
+
+    let mut buf = data.to_vec();
+    let mut enc_len = buf.len().min(512);
+    if enc_len % 16 != 0 {
+        let pad = 16 - buf.len() % 16;
+        buf.resize(buf.len() + pad, 0);
+        enc_len += pad;
+    }
+    if enc_len > 0 {
+        cbc::Encryptor::<aes::Aes128>::new(key.into(), iv.into())
+            .encrypt_padded_mut::<NoPadding>(&mut buf[..enc_len], enc_len)
+            .expect("enc_len est un multiple de 16 : NoPadding ne peut pas échouer");
+    }
+    buf
+}
+
 /// Dérive la device key d'un appareil boîte à histoires V2 depuis le contenu binaire du fichier `.md`.
 ///
 /// Algorithme (StoryBox.QT `__md1to5_parse`) :
@@ -159,7 +184,7 @@ pub fn derive_v2_device_key(md_data: &[u8]) -> Result<[u32; 4], String> {
 
 /// Retourne la version hardware boîte à histoires depuis l'octet 0 du fichier `.md`.
 /// - md_version < 6 → V2 (XXTEA)
-/// - md_version >= 6 → V3 (AES-128-CBC, non supporté dans cette variante)
+/// - md_version >= 6 → V3 (AES-128-CBC, voir `storybox_v3` : v6/v7 supportés, v8+ refusé)
 pub fn md_hw_version(md_data: &[u8]) -> u8 {
     if md_data.is_empty() {
         return 0;
@@ -272,5 +297,84 @@ mod tests {
         assert_eq!(md_hw_version(&[0x07]), 3); // md_version 7 → V3
         assert_eq!(md_hw_version(&[0x00]), 2); // md_version 0 → V2
         assert_eq!(md_hw_version(&[]), 0);     // vide
+    }
+
+    // ── AES V3 : vecteurs produits par StoryBox.QT `aes_cipher` (Python + pycryptodome) ──
+    // Script hors dépôt : cf. rapport M0005. Données : data[i] = (i*a + b) & 0xFF.
+
+    fn pattern(len: usize, a: usize, b: usize) -> Vec<u8> {
+        (0..len).map(|i| ((i * a + b) & 0xFF) as u8).collect()
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        hex::decode(s).unwrap()
+    }
+
+    fn key16(s: &str) -> [u8; 16] {
+        unhex(s).try_into().unwrap()
+    }
+
+    /// Clés « fake story » d'une V3 .md v6 (SNU ASCII « 0A1B2C3D4E5F60 »).
+    const V6_KEY: &str = "62316130643363326635653400003036";
+    const V6_IV: &str = "00000000000000006231613064336332";
+
+    #[test]
+    fn cipher_v3_short_file_is_zero_padded_to_16() {
+        // 100 octets → complété à 112 puis chiffré en entier
+        let enc = cipher_story_data_v3(&pattern(100, 13, 5), &key16(V6_KEY), &key16(V6_IV));
+        assert_eq!(
+            hex::encode(&enc),
+            "e71f69e609817bf2c9df50eb97d31dea3f8e3db4e43e3545a85889babfb8a48801b498689029d859\
+             c001ef1a4e87e3a5af6190d7a0ee2e25a5fbea65887c836faf86acdd1366b7f94a1a500e4470fd40\
+             34bf36cccf3d1ddf7f917abb1363219c1a1dd5abaf55e3d5a1cb5204c9f8e286"
+        );
+    }
+
+    #[test]
+    fn cipher_v3_multiple_of_16_is_not_padded() {
+        let enc = cipher_story_data_v3(&pattern(48, 11, 1), &key16(V6_KEY), &key16(V6_IV));
+        assert_eq!(
+            hex::encode(&enc),
+            "b2a9ef986640e9a3286d91618025864ed3060784a86dae4fee073874c4161662797ac564a7c52374\
+             bae2e0984b5fb4df"
+        );
+    }
+
+    #[test]
+    fn cipher_v3_only_first_512_bytes() {
+        let plain = pattern(1024, 7, 3);
+        let enc = cipher_story_data_v3(&plain, &key16(V6_KEY), &key16(V6_IV));
+        assert_eq!(enc.len(), 1024);
+        assert_eq!(
+            hex::encode(&enc[..32]),
+            "818f50b708848a06fa072edfa18ef536356bf75bbea87790a3a6b4a83388a78d"
+        );
+        assert_eq!(&enc[512..], &plain[512..], "au-delà de 512 octets : en clair");
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            hex::encode(Sha256::digest(&enc)),
+            "b1077fda975f45e3e8084b00fff5367493ed9a208a98fe878b9128ac8b92c7c5"
+        );
+    }
+
+    #[test]
+    fn cipher_v3_v7_keys_vectors() {
+        let key = key16("a3a2a1a0a7a6a5a4abaaa9a8afaeadac");
+        let iv = key16("b3b2b1b0b7b6b5b4bbbab9b8bfbebdbc");
+        assert_eq!(
+            hex::encode(cipher_story_data_v3(&pattern(48, 11, 1), &key, &iv)),
+            "0090b19c21f4b91c98974a99e8e064cec3315fe00135690eb455c2d173722639ed60d29bfaf77e51\
+             6dd9bd5863be76d2"
+        );
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            hex::encode(Sha256::digest(cipher_story_data_v3(&pattern(1024, 7, 3), &key, &iv))),
+            "259fe744749db74cd1022fd85c74bb6d9d7915ee8a8f3a46073eaecfc44c6e89"
+        );
+    }
+
+    #[test]
+    fn cipher_v3_empty_is_untouched() {
+        assert!(cipher_story_data_v3(&[], &[0; 16], &[0; 16]).is_empty());
     }
 }

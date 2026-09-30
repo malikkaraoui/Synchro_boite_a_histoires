@@ -6,6 +6,7 @@ mod storybox_crypto;
 mod storybox_device;
 mod storybox_import;
 mod storybox_sync;
+mod storybox_v3;
 mod story_pack;
 mod studio_story;
 
