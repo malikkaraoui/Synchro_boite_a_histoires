@@ -261,11 +261,13 @@ pub fn write_sidecar_in(story_dir: &Path, story_id: &str, hash: &str) -> Result<
 
 // ── Suppression orphelins ─────────────────────────────────────────────────────
 
-/// Supprime un dossier story orphelin depuis `.content/<short_uuid>/`.
+/// Supprime un dossier story orphelin depuis `.content/<short_uuid>/`, en le renommant d'abord
+/// en transit : une suppression interrompue ne laisse jamais de coquille sous `<short_uuid>`.
 pub fn remove_orphan_story(mount: &str, short_uuid: &str) -> Result<(), String> {
-    let story_dir = Path::new(mount).join(".content").join(short_uuid);
+    let content_dir = Path::new(mount).join(".content");
+    let story_dir = content_dir.join(short_uuid);
     if story_dir.is_dir() {
-        fs::remove_dir_all(&story_dir)
+        crate::storybox_import::discard_dir(&content_dir, short_uuid, &story_dir)
             .map_err(|e| format!("Suppression {story_dir:?} échouée : {e}"))?;
     }
     Ok(())
@@ -417,5 +419,30 @@ mod tests {
 
         remove_orphan_story(&mount, "DEADBEEF").unwrap();
         assert!(!content.exists());
+    }
+
+    /// Suppression interrompue (fichier verrouillé) : aucune coquille sous `<S>`, seulement un
+    /// transit, jeté au nettoyage suivant.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn interrupted_orphan_removal_leaves_only_a_transit() {
+        use crate::storybox_import::test_uchg::{chflags, require_uchg, Unlock};
+        let tmp = TempDir::new("storybox-remove-orphan-uchg");
+        let _unlock = Unlock(tmp.path.clone());
+        require_uchg(&tmp.path);
+        let content = tmp.path.join(".content");
+        fs::create_dir_all(content.join("DEADBEEF/sf/000")).unwrap();
+        fs::write(content.join("DEADBEEF/ni"), b"ni").unwrap();
+        fs::write(content.join("DEADBEEF/sf/000/A"), b"a").unwrap();
+        chflags("uchg", &content.join("DEADBEEF/sf/000/A"));
+        let mount = tmp.path.to_string_lossy().into_owned();
+
+        assert!(remove_orphan_story(&mount, "DEADBEEF").is_err());
+        assert!(!content.join("DEADBEEF").exists(), "pas de coquille sous le nom définitif");
+        assert!(content.join(".DEADBEEF.tmp").is_dir());
+
+        chflags("nouchg", &content.join(".DEADBEEF.tmp/sf/000/A"));
+        crate::storybox_import::clean_import_leftovers(&content).unwrap();
+        assert!(!content.join(".DEADBEEF.tmp").exists());
     }
 }

@@ -238,6 +238,11 @@ pub fn import_story(
 // succès complet : `<SHORT>` → `.<SHORT>.old`, `.<SHORT>.tmp` → `<SHORT>`, index, puis
 // suppression de `.old`. Un échec avant le remplacement laisse la boîte et `.pi` intacts.
 // Les dossiers commençant par `.` sont ignorés par l'inventaire, le comptage et l'index.
+//
+// Invariant (R004 R4-1) : aucun dossier d'histoire n'est supprimé sous un nom qui compte.
+// `<SHORT>` et `.<SHORT>.old` sont d'abord renommés en `.<SHORT>.tmp` (`discard_dir`), puis
+// supprimés sous ce nom. Une suppression interrompue ne laisse donc qu'un transit, jeté sans
+// condition au nettoyage : `<SHORT>` et `.<SHORT>.old` sont toujours des histoires entières.
 
 const STAGING_SUFFIX: &str = ".tmp";
 const PREVIOUS_SUFFIX: &str = ".old";
@@ -246,15 +251,23 @@ fn staging_dir_name(short_uuid: &str, suffix: &str) -> String {
     format!(".{short_uuid}{suffix}")
 }
 
-/// Nettoie les restes d'un import interrompu (crash, débranchement). Un dossier est jugé sur
-/// son **contenu** (`is_complete_story_dir`), jamais sur sa seule présence :
-/// - `.<SHORT>.tmp` : histoire jamais installée → supprimée ;
-/// - `.<SHORT>.old` sans `<SHORT>` : interruption entre les deux renommages → restaurée ;
-/// - `.<SHORT>.old` avec `<SHORT>` complet : remplacement abouti → supprimée ;
-/// - `.<SHORT>.old` complet avec `<SHORT>` incomplet : retour arrière interrompu, `.old` est la
-///   seule copie saine → échangés (`.old` redevient `<SHORT>`, la copie incomplète passe en
-///   transit puis est retirée) ;
-/// - ni l'un ni l'autre complet : rien n'est supprimé, seulement signalé.
+/// Supprime le dossier d'histoire `dir` de `content_dir` sans jamais le laisser à moitié vidé
+/// sous son nom : il passe d'abord en `.<short_uuid>.tmp` (un transit resté là est jeté avant).
+pub(crate) fn discard_dir(content_dir: &Path, short_uuid: &str, dir: &Path) -> std::io::Result<()> {
+    let transit = content_dir.join(staging_dir_name(short_uuid, STAGING_SUFFIX));
+    if transit.exists() {
+        fs::remove_dir_all(&transit)?;
+    }
+    fs::rename(dir, &transit)?;
+    fs::remove_dir_all(&transit)
+}
+
+/// Nettoie les restes d'un import interrompu (crash, débranchement). Grâce à l'invariant
+/// ci-dessus, aucun dossier n'est jugé sur son contenu :
+/// - `.<SHORT>.tmp` : histoire jamais installée, ou en cours de suppression → supprimée ;
+/// - `.<SHORT>.old` sans `<SHORT>` : interruption entre deux renommages → restaurée ;
+/// - `.<SHORT>.old` avec `<SHORT>` : `<SHORT>` est la nouvelle histoire, entière (installée par
+///   un seul renommage, jamais entamée) → `.old` est supprimé.
 ///
 /// Seuls les dossiers de cette forme exacte (8 hex) sont touchés : c'est ce que crée l'import.
 /// Renvoie les signalements à montrer à l'utilisateur.
@@ -281,7 +294,6 @@ pub(crate) fn clean_import_leftovers(content_dir: &Path) -> Result<Vec<String>, 
         if is_previous {
             previous.push(short_uuid.to_string());
         } else {
-            // Les transits d'abord : l'échange ci-dessous réutilise leur nom.
             fs::remove_dir_all(entry.path())
                 .map_err(|e| format!("Suppression de {name} échouée : {e}"))?;
         }
@@ -291,29 +303,13 @@ pub(crate) fn clean_import_leftovers(content_dir: &Path) -> Result<Vec<String>, 
     for short_uuid in previous {
         let old = content_dir.join(staging_dir_name(&short_uuid, PREVIOUS_SUFFIX));
         let live = content_dir.join(&short_uuid);
-        if !live.exists() {
+        if live.exists() {
+            discard_dir(content_dir, &short_uuid, &old)
+                .map_err(|e| format!("Suppression de .{short_uuid}{PREVIOUS_SUFFIX} échouée : {e}"))?;
+        } else {
             fs::rename(&old, &live)
                 .map_err(|e| format!("Restauration de {short_uuid} échouée : {e}"))?;
             notices.push(format!("{short_uuid} était resté de côté : l'histoire a été remise en place"));
-        } else if storybox_device::is_complete_story_dir(&live) {
-            fs::remove_dir_all(&old)
-                .map_err(|e| format!("Suppression de .{short_uuid}{PREVIOUS_SUFFIX} échouée : {e}"))?;
-        } else if live.is_dir() && storybox_device::is_complete_story_dir(&old) {
-            // Chaque étape laisse un état que ce même nettoyage sait reprendre.
-            let aside = content_dir.join(staging_dir_name(&short_uuid, STAGING_SUFFIX));
-            fs::rename(&live, &aside)
-                .map_err(|e| format!("Mise de côté de la copie incomplète de {short_uuid} échouée : {e}"))?;
-            fs::rename(&old, &live)
-                .map_err(|e| format!("Restauration de {short_uuid} échouée : {e}"))?;
-            fs::remove_dir_all(&aside)
-                .map_err(|e| format!("Suppression de la copie incomplète de {short_uuid} échouée : {e}"))?;
-            notices.push(format!(
-                "{short_uuid} était incomplet : la version précédente, complète, a été remise en place"
-            ));
-        } else {
-            notices.push(format!(
-                "ni {short_uuid} ni .{short_uuid}{PREVIOUS_SUFFIX} ne sont complets : laissés tels quels sur la boîte"
-            ));
         }
     }
     Ok(notices)
@@ -400,9 +396,25 @@ pub(crate) fn install_story(
         Err(e) => {
             let mut err = format!("Mise à jour index échouée : {e}");
             err = with_cleanup(err, pack_index.restore(), "restauration de .pi");
-            err = with_cleanup(err, fs::remove_dir_all(&story_dir), "retrait de la nouvelle histoire");
-            if replacing {
-                err = with_cleanup(err, fs::rename(&previous_dir, &story_dir), "restauration de l'ancienne histoire");
+            // Retour arrière par renommages : la nouvelle histoire quitte `<SHORT>` AVANT d'être
+            // supprimée, l'ancienne y revient, puis le transit est supprimé.
+            match fs::rename(&story_dir, &staging_dir) {
+                Ok(()) => {
+                    if replacing {
+                        err = with_cleanup(err, fs::rename(&previous_dir, &story_dir), "restauration de l'ancienne histoire");
+                    }
+                    err = with_cleanup(err, fs::remove_dir_all(&staging_dir), "retrait de la nouvelle histoire");
+                }
+                Err(e) => {
+                    // `<SHORT>` n'a pas bougé : c'est la nouvelle histoire ENTIÈRE, écrite en
+                    // transit puis installée par un seul renommage, jamais entamée. La garder est
+                    // sûr : `.pi` est déjà revenu à l'instantané (tous ses dossiers existent), et
+                    // `.old` n'est plus que la version remplacée.
+                    err = format!("{err} ; retrait de la nouvelle histoire échoué : {e}, elle reste installée");
+                    if replacing {
+                        err = with_cleanup(err, discard_dir(&content_dir, short_uuid, &previous_dir), "suppression de l'ancienne histoire");
+                    }
+                }
             }
             return Err(err);
         }
@@ -410,7 +422,7 @@ pub(crate) fn install_story(
 
     // Un `.old` non supprimé ici est retiré au prochain import (clean_import_leftovers).
     if replacing {
-        let _ = fs::remove_dir_all(&previous_dir);
+        let _ = discard_dir(&content_dir, short_uuid, &previous_dir);
     }
 
     Ok(ImportResult { short_uuid: short_uuid.to_string() })
@@ -827,6 +839,11 @@ mod tests {
 
             assert_eq!(snapshot(mount.path()), before, "md v{} : ancienne histoire et .pi restaurés", md[0]);
             assert_eq!(fs::read(mount.path().join(".pi")).unwrap(), full_uuids);
+
+            // Nouvelle histoire (rien à remplacer) : elle est retirée, la boîte reste identique.
+            let fresh = write_pack_json(packs.path(), "fresh.zip", &other_story_json(), &pattern(900, 5, 1), true);
+            assert!(import(mount.path(), &fresh).unwrap_err().starts_with("Mise à jour index échouée"));
+            assert_eq!(snapshot(mount.path()), before, "md v{} : nouvelle histoire retirée", md[0]);
         }
     }
 
@@ -904,117 +921,115 @@ mod tests {
         (res, log.into_inner())
     }
 
-    #[cfg(unix)]
-    fn chmod(path: &Path, mode: u32) {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
-    }
-
-    /// Faux sur un volume qui ignore les droits (FAT) ou pour root : le scénario A2 n'y est pas
-    /// reproductible.
-    #[cfg(unix)]
-    fn permissions_are_enforced(dir: &Path) -> bool {
-        let probe = dir.join("droits");
-        fs::create_dir_all(&probe).unwrap();
-        chmod(&probe, 0o555);
-        let enforced = fs::write(probe.join("x"), b"x").is_err();
-        chmod(&probe, 0o755);
-        fs::remove_dir_all(&probe).unwrap();
-        enforced
-    }
-
-    /// R003 A2 : l'index échoue après le remplacement ET le retrait de la nouvelle histoire
-    /// échoue à moitié. `.old` est alors la seule copie saine : l'import suivant d'une AUTRE
-    /// histoire doit la remettre en place, pas la supprimer.
-    #[cfg(unix)]
+    /// R003 A2 / R004 P1 : l'index échoue après le remplacement ET le retrait de la nouvelle
+    /// histoire s'arrête en route. Rejoué en bloquant tour à tour CHAQUE fichier de la nouvelle
+    /// histoire : le point d'arrêt ne dépend pas de l'ordre de `readdir` (hachage sur APFS,
+    /// création sur FAT). Attendu à chaque fois : l'ancienne histoire intacte sous `<S>`, `.pi`
+    /// inchangé, le reste partiel seulement en `.<S>.tmp`, jeté à l'import suivant.
+    #[cfg(target_os = "macos")]
     #[test]
-    fn double_failure_then_other_import_keeps_previous_story() {
+    fn double_failure_keeps_previous_story_whatever_the_deletion_order() {
+        use test_uchg::{chflags, require_uchg, Unlock};
+        let files: Vec<String> = {
+            let (mount, packs) = mount_with_imported_story(&md_v5());
+            let new = write_pack(packs.path(), "new.zip", &pattern(1000, 7, 3), true);
+            import(mount.path(), &new).unwrap();
+            tree(&mount.path().join(".content/89ABCDEF")).into_keys().collect()
+        };
+        assert!(files.len() >= 8, "{files:?}");
+
+        for locked in &files {
+            let (mount, packs) = mount_with_imported_story(&md_v5());
+            let _unlock = Unlock(mount.path().to_path_buf());
+            require_uchg(mount.path());
+            let content = mount.path().join(".content");
+            let live = content.join("89ABCDEF");
+            let previous = snapshot(&live);
+            fs::remove_file(mount.path().join(".pi.hidden")).unwrap();
+            fs::create_dir_all(mount.path().join(".pi.hidden")).unwrap();
+            let pi_before = fs::read(mount.path().join(".pi")).unwrap();
+
+            let new = write_pack(packs.path(), "new.zip", &pattern(1000, 7, 3), true);
+            let err = import_story(mount.path().to_str().unwrap(), &new, "histoire", "h", &|m| {
+                if m.starts_with("Mise à jour de l'index") {
+                    chflags("uchg", &live.join(locked));
+                }
+            })
+            .unwrap_err();
+            assert!(err.contains("retrait de la nouvelle histoire échoué"), "[{locked}] échec non injecté : {err}");
+            assert_eq!(snapshot(&live), previous, "[{locked}] l'ancienne histoire est intacte sous <S>");
+            assert_eq!(fs::read(mount.path().join(".pi")).unwrap(), pi_before, "[{locked}] .pi inchangé");
+            assert_eq!(hidden_content_entries(mount.path()), vec![".89ABCDEF.tmp"], "[{locked}] seul un transit reste");
+
+            // L'erreur passagère disparaît ; l'utilisateur importe une AUTRE histoire.
+            chflags("nouchg", &content.join(".89ABCDEF.tmp").join(locked));
+            fs::remove_dir_all(mount.path().join(".pi.hidden")).unwrap();
+            let other = write_pack_json(packs.path(), "other.zip", &other_story_json(), &pattern(900, 5, 1), true);
+            assert_eq!(import(mount.path(), &other).unwrap().short_uuid, "CAFE0001", "[{locked}]");
+            assert_eq!(snapshot(&live), previous, "[{locked}]");
+            assert!(hidden_content_entries(mount.path()).is_empty(), "[{locked}] transit jeté");
+            let pi = pi_short_uuids(mount.path());
+            for short in ["89ABCDEF", "AABBCCDD", "CAFE0001"] {
+                assert!(pi.contains(&short.to_string()), "[{locked}] {short} indexé : {pi:?}");
+            }
+        }
+    }
+
+    /// Import réussi, mais la suppression de l'ancienne version (`.old`) s'arrête en route : la
+    /// nouvelle histoire est en place, seul un transit reste, jeté à l'import suivant.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn interrupted_removal_of_previous_leaves_only_a_transit() {
+        use test_uchg::{chflags, require_uchg, Unlock};
+        let (mount, packs) = mount_with_imported_story(&md_v5());
+        let _unlock = Unlock(mount.path().to_path_buf());
+        require_uchg(mount.path());
+        let content = mount.path().join(".content");
+        let new_audio = pattern(1000, 7, 3);
+        let new = write_pack(packs.path(), "new.zip", &new_audio, true);
+        import_story(mount.path().to_str().unwrap(), &new, "histoire", "h", &|m| {
+            if m.starts_with("Mise à jour de l'index") {
+                chflags("uchg", &content.join(".89ABCDEF.old/sf/000/HISTOIRE"));
+            }
+        })
+        .unwrap();
+        assert_eq!(&fs::read(content.join("89ABCDEF/sf/000/HISTOIRE")).unwrap()[512..], &new_audio[512..]);
+        assert_eq!(hidden_content_entries(mount.path()), vec![".89ABCDEF.tmp"]);
+
+        chflags("nouchg", &content.join(".89ABCDEF.tmp/sf/000/HISTOIRE"));
+        let other = write_pack_json(packs.path(), "other.zip", &other_story_json(), &pattern(900, 5, 1), true);
+        import(mount.path(), &other).unwrap();
+        assert!(hidden_content_entries(mount.path()).is_empty());
+        assert_eq!(&fs::read(content.join("89ABCDEF/sf/000/HISTOIRE")).unwrap()[512..], &new_audio[512..]);
+    }
+
+    /// Premier renommage du retour arrière refusé (`.<S>.tmp` occupé par un dossier non vide :
+    /// ENOTEMPTY sur APFS comme sur FAT, qui ignore `uchg` sur un dossier) : la nouvelle histoire
+    /// reste installée, entière ; `.old` est supprimé et `.pi` revient à l'instantané.
+    #[test]
+    fn index_failure_keeps_new_story_when_it_cannot_be_moved_aside() {
         let (mount, packs) = mount_with_imported_story(&md_v5());
         let content = mount.path().join(".content");
-        if !permissions_are_enforced(mount.path()) {
-            eprintln!("A2 non reproductible ici (droits ignorés) : test sauté");
-            return;
-        }
-        let previous = snapshot(&content.join("89ABCDEF"));
+        let live = content.join("89ABCDEF");
         fs::remove_file(mount.path().join(".pi.hidden")).unwrap();
         fs::create_dir_all(mount.path().join(".pi.hidden")).unwrap();
+        let pi_before = fs::read(mount.path().join(".pi")).unwrap();
 
-        let err = install_story(mount.path().to_str().unwrap(), "89ABCDEF", "histoire", "h", &|_| {}, |dir| {
-            for f in ["ni", "li", "ri", "si", "bt"] {
-                fs::write(dir.join(f), f.as_bytes()).map_err(|e| e.to_string())?;
+        let new_audio = pattern(1000, 7, 3);
+        let new = write_pack(packs.path(), "new.zip", &new_audio, true);
+        let installed = std::cell::RefCell::new(BTreeMap::new());
+        let err = import_story(mount.path().to_str().unwrap(), &new, "histoire", "h", &|m| {
+            if m.starts_with("Mise à jour de l'index") {
+                *installed.borrow_mut() = snapshot(&live);
+                fs::create_dir_all(content.join(".89ABCDEF.tmp/occupé")).unwrap();
             }
-            fs::write(dir.join("sf/000/HISTOIRE"), b"nouvelle").map_err(|e| e.to_string())?;
-            chmod(&dir.join("sf/000"), 0o555);
-            Ok(())
         })
         .unwrap_err();
-        chmod(&content.join("89ABCDEF/sf/000"), 0o755);
-        assert!(err.contains("retrait de la nouvelle histoire échoué"), "{err}");
-        assert!(content.join(".89ABCDEF.old").is_dir(), "l'ancienne histoire est en .old");
-        assert!(
-            !crate::storybox_device::is_complete_story_dir(&content.join("89ABCDEF")),
-            "précondition A2 : la nouvelle histoire est à moitié retirée"
-        );
-
-        fs::remove_dir_all(mount.path().join(".pi.hidden")).unwrap();
-        let other = write_pack_json(packs.path(), "other.zip", &other_story_json(), &pattern(900, 5, 1), true);
-        let (res, log) = import_logged(mount.path(), &other);
-        assert_eq!(res.unwrap().short_uuid, "CAFE0001");
-
-        assert_eq!(snapshot(&content.join("89ABCDEF")), previous, "l'ancienne histoire est remise en place");
-        assert!(!content.join(".89ABCDEF.old").exists());
-        assert!(!content.join(".89ABCDEF.tmp").exists());
-        assert!(log.iter().any(|l| l.contains("89ABCDEF était incomplet")), "{log:?}");
-        let pi = pi_short_uuids(mount.path());
-        for short in ["89ABCDEF", "AABBCCDD", "CAFE0001"] {
-            assert!(pi.contains(&short.to_string()), "{short} indexé : {pi:?}");
-        }
-    }
-
-    /// Même état que A2, construit directement (tous volumes) : `<S>` incomplet, `.old` complet.
-    #[test]
-    fn cleanup_swaps_incomplete_story_with_complete_previous() {
-        let (mount, packs) = mount_with_imported_story(&md_v7());
-        let content = mount.path().join(".content");
-        let previous = snapshot(&content.join("89ABCDEF"));
-        fs::rename(content.join("89ABCDEF"), content.join(".89ABCDEF.old")).unwrap();
-        fs::create_dir_all(content.join("89ABCDEF/sf/000")).unwrap();
-        fs::write(content.join("89ABCDEF/li"), b"partiel").unwrap();
-
-        let other = write_pack_json(packs.path(), "other.zip", &other_story_json(), &pattern(900, 5, 1), true);
-        let (res, log) = import_logged(mount.path(), &other);
-        res.unwrap();
-
-        assert_eq!(snapshot(&content.join("89ABCDEF")), previous);
-        assert!(hidden_content_entries(mount.path()).is_empty(), "ni .tmp ni .old ne restent");
-        assert!(log.iter().any(|l| l.contains("89ABCDEF était incomplet")), "{log:?}");
-    }
-
-    /// Ni `<S>` ni `.old` complets : rien n'est supprimé, c'est signalé ; un réimport de `<S>`
-    /// échoue alors sans rien modifier.
-    #[test]
-    fn cleanup_never_deletes_when_neither_copy_is_complete() {
-        let (mount, packs) = mount_with_imported_story(&md_v7());
-        let content = mount.path().join(".content");
-        fs::create_dir_all(content.join(".89ABCDEF.old")).unwrap();
-        fs::write(content.join(".89ABCDEF.old/ni"), b"ancienne, partielle").unwrap();
-        fs::remove_file(content.join("89ABCDEF/bt")).unwrap();
-        let old_copy = snapshot(&content.join(".89ABCDEF.old"));
-        let live_copy = snapshot(&content.join("89ABCDEF"));
-
-        let other = write_pack_json(packs.path(), "other.zip", &other_story_json(), &pattern(900, 5, 1), true);
-        let (res, log) = import_logged(mount.path(), &other);
-        res.unwrap();
-        assert!(content.join(".89ABCDEF.old").is_dir(), "aucune copie n'est supprimée");
-        assert_eq!(snapshot(&content.join(".89ABCDEF.old")), old_copy);
-        assert_eq!(snapshot(&content.join("89ABCDEF")), live_copy);
-        assert!(log.iter().any(|l| l.contains("ni 89ABCDEF ni .89ABCDEF.old ne sont complets")), "{log:?}");
-
-        let before = snapshot(mount.path());
-        let same = write_pack(packs.path(), "same.zip", &pattern(1000, 7, 3), true);
-        let err = import(mount.path(), &same).unwrap_err();
-        assert!(err.contains("Mise de côté"), "{err}");
-        assert_eq!(snapshot(mount.path()), before, "boîte identique");
+        assert!(err.contains("elle reste installée"), "{err}");
+        assert_eq!(snapshot(&live), installed.into_inner(), "nouvelle histoire entière");
+        assert_eq!(&fs::read(live.join("sf/000/HISTOIRE")).unwrap()[512..], &new_audio[512..]);
+        assert!(hidden_content_entries(mount.path()).is_empty(), "ni .old ni .tmp");
+        assert_eq!(fs::read(mount.path().join(".pi")).unwrap(), pi_before);
     }
 
     /// R003 A3 : coupure entre `<S>` → `.old` et `.tmp` → `<S>`, puis « Réparer l'index » (le
@@ -1090,5 +1105,42 @@ mod tests {
         .collect();
         assert_eq!(actual, expected);
         assert_pack_index(mount.path());
+    }
+}
+
+/// Injection d'échecs par `chflags uchg` : respecté par APFS ET par msdos (FAT32, le système de
+/// fichiers de la boîte), contrairement à `chmod`, que FAT ignore (R004).
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) mod test_uchg {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    pub fn chflags(flag: &str, path: &Path) {
+        let status = Command::new("chflags").arg(flag).arg(path).status().unwrap();
+        assert!(status.success(), "chflags {flag} {path:?}");
+    }
+
+    /// Retire au drop tous les `uchg` sous le dossier, même si le test panique.
+    pub struct Unlock(pub PathBuf);
+
+    impl Drop for Unlock {
+        fn drop(&mut self) {
+            let _ = Command::new("chflags").args(["-R", "nouchg"]).arg(&self.0).status();
+        }
+    }
+
+    /// Un volume qui ignore `uchg` fait ÉCHOUER le test, au lieu de le sauter en silence.
+    pub fn require_uchg(dir: &Path) {
+        let probe = dir.join("uchg-probe");
+        fs::write(&probe, b"x").unwrap();
+        chflags("uchg", &probe);
+        let enforced = fs::remove_file(&probe).is_err();
+        chflags("nouchg", &probe);
+        let _ = fs::remove_file(&probe);
+        assert!(
+            enforced,
+            "chflags uchg ignoré sur le volume de {dir:?} : le scénario n'y est pas testable (échec voulu, pas de saut)"
+        );
     }
 }
