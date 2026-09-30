@@ -21,44 +21,33 @@ pub struct StorageInfo {
     pub free_bytes: u64,
 }
 
-/// Retourne les infos d'espace disque via `df -k` (macOS/Linux).
+/// Retourne les infos d'espace disque via la syscall POSIX `statvfs` (sandbox-friendly).
+#[cfg(unix)]
 pub fn get_storage_info(mount: &str) -> Result<StorageInfo, String> {
-    #[cfg(feature = "mac-app-store")]
-    {
-        let _ = mount;
-        return Err("Espace disque non disponible dans cette variante.".to_string());
+    use std::ffi::CString;
+    use std::mem::MaybeUninit;
+
+    let c_path = CString::new(mount).map_err(|_| "Chemin invalide".to_string())?;
+    let mut stat = MaybeUninit::<libc::statvfs>::uninit();
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(format!("statvfs échoué (errno {})", std::io::Error::last_os_error()));
     }
-    #[cfg(unix)]
-    {
-        let out = std::process::Command::new("df")
-            .arg("-k")
-            .arg(mount)
-            .output()
-            .map_err(|e| format!("df échoué : {e}"))?;
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let line = stdout.lines().nth(1).ok_or("df : sortie inattendue")?;
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 4 {
-            return Err("df : format inattendu".to_string());
-        }
-        let total_kb: u64 = parts[1].parse().map_err(|_| "df : parse total")?;
-        let used_kb: u64  = parts[2].parse().map_err(|_| "df : parse used")?;
-        let free_kb: u64  = parts[3].parse().map_err(|_| "df : parse free")?;
-        Ok(StorageInfo {
-            total_bytes: total_kb * 1024,
-            used_bytes:  used_kb  * 1024,
-            free_bytes:  free_kb  * 1024,
-        })
-    }
-    #[cfg(windows)]
-    {
-        // Approximation Windows via GetDiskFreeSpaceEx (not yet implemented)
-        Err("Espace disque non disponible sur Windows dans cette version".to_string())
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        Err("Plateforme non supportée".to_string())
-    }
+    let stat = unsafe { stat.assume_init() };
+    let frsize = stat.f_frsize as u64;
+    let total = stat.f_blocks as u64 * frsize;
+    let free  = stat.f_bavail as u64 * frsize;
+    let used  = total.saturating_sub(free);
+    Ok(StorageInfo {
+        total_bytes: total,
+        used_bytes:  used,
+        free_bytes:  free,
+    })
+}
+
+#[cfg(not(unix))]
+pub fn get_storage_info(_mount: &str) -> Result<StorageInfo, String> {
+    Err("Espace disque non disponible sur cette plateforme".to_string())
 }
 
 #[derive(Debug, Clone, Serialize)]

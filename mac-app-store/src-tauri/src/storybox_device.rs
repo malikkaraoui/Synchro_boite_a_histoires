@@ -194,32 +194,10 @@ impl StoryBoxDeviceProbe {
     }
 }
 
-/// Retourne un identifiant stable pour le volume monté (UUID macOS hors sandbox, path sinon).
+/// Retourne un identifiant stable pour le volume monté.
+/// Sandbox App Store : pas de `diskutil`, on dérive depuis le chemin de montage.
+/// L'identification primaire est faite ailleurs via le serial-number lu sur le device.
 pub fn get_volume_id(mount: &str) -> Option<String> {
-    #[cfg(all(target_os = "macos", not(feature = "mac-app-store")))]
-    {
-        if let Ok(out) = std::process::Command::new("diskutil")
-            .args(["info", mount])
-            .output()
-        {
-            let text = String::from_utf8_lossy(&out.stdout);
-            for line in text.lines() {
-                if line.contains("Volume UUID") {
-                    if let Some(id) = line.split(':').nth(1) {
-                        let id = id.trim().to_string();
-                        if !id.is_empty() && id != "none" { return Some(id); }
-                    }
-                }
-            }
-            for line in text.lines() {
-                if line.to_lowercase().contains("disk identifier") {
-                    if let Some(id) = line.split(':').nth(1) {
-                        return Some(format!("disk-{}", id.trim()));
-                    }
-                }
-            }
-        }
-    }
     Some(format!("vol-{}", mount.replace('/', "_")))
 }
 

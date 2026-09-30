@@ -1,6 +1,6 @@
 // Synchro Boîte à histoires V2 — UI deux colonnes
 const { invoke } = window.__TAURI__.core;
-const { open }   = window.__TAURI__.dialog;
+const { open, ask }   = window.__TAURI__.dialog;
 const { listen } = window.__TAURI__.event;
 
 const APP_VERSION = "2.1.12";
@@ -1197,15 +1197,14 @@ $refreshBtn.addEventListener("click", async () => {
 $repairBtn.addEventListener("click", async () => {
   if (!deviceMount || syncing) return;
 
-  const confirmed = window.confirm(
-    "🔧 Réparer l'index de la boîte\n\n" +
+  const confirmed = await ask(
     "À utiliser uniquement si :\n" +
     "  • Un import s'est interrompu (crash, déconnexion)\n" +
     "  • Des fichiers ont été copiés manuellement via le Finder\n" +
     "  • L'index semble corrompu ou incomplet\n\n" +
     "⚠️ Cette action NE change PAS l'ordre des histoires.\n" +
-    "Pour réordonner, utilisez le glisser-déposer dans la liste.\n\n" +
-    "Continuer la réparation ?"
+    "Pour réordonner, utilisez le glisser-déposer dans la liste.",
+    { title: "Réparer l'index de la boîte ?", kind: "warning", okLabel: "Réparer", cancelLabel: "Annuler" }
   );
   if (!confirmed) return;
 
