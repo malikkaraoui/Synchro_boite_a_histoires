@@ -435,7 +435,7 @@ pub fn reorder_story_in_pack_index(
 /// jamais indexé (import interrompu, copie partielle).
 const REQUIRED_STORY_FILES: [&str; 5] = ["ni", "li", "ri", "si", "bt"];
 
-fn is_complete_story_dir(story_dir: &Path) -> bool {
+pub(crate) fn is_complete_story_dir(story_dir: &Path) -> bool {
     REQUIRED_STORY_FILES.iter().all(|f| story_dir.join(f).is_file())
 }
 
@@ -447,6 +447,8 @@ pub struct PackIndexRepair {
     pub indexed: usize,
     /// Dossiers `.content/<SHORT>` incomplets : non indexés, jamais supprimés automatiquement.
     pub incomplete: Vec<String>,
+    /// Restes d'un import interrompu traités ou laissés avant la réparation (signalements).
+    pub leftovers: Vec<String>,
 }
 
 /// Reconstruit `.pi` depuis les dossiers **complets** de `.content/`, en gardant l'ordre
@@ -501,6 +503,7 @@ pub fn repair_pack_index_native(mount: &str) -> Result<PackIndexRepair, String> 
     Ok(PackIndexRepair {
         indexed: visible_uuid_entries.len() + hidden_uuid_entries.len(),
         incomplete,
+        leftovers: Vec::new(),
     })
 }
 

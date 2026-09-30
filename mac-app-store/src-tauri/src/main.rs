@@ -449,6 +449,7 @@ fn emit_sync_line(app: &tauri::AppHandle, payload: serde_json::Value) {
 }
 
 /// Répare le fichier d'index (.pi) de la boîte à histoires en pur Rust.
+/// Termine d'abord un import interrompu (restes `.tmp`/`.old`), puis reconstruit l'index.
 /// Seuls les dossiers complets sont indexés ; les incomplets sont renvoyés, pas supprimés.
 #[tauri::command]
 async fn repair_pack_index(
@@ -457,7 +458,7 @@ async fn repair_pack_index(
     device_id: String,
 ) -> Result<storybox_device::PackIndexRepair, String> {
     access.require_mount(&device_mount, &device_id)?;
-    storybox_device::repair_pack_index_native(&device_mount)
+    storybox_import::repair_pack_index(&device_mount)
 }
 
 // ── Canal de distribution + mise à jour (App Store gère via le Store) ─────────

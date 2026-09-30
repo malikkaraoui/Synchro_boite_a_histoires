@@ -1264,6 +1264,9 @@ $repairBtn.addEventListener("click", async () => {
   $logDrawer.classList.remove("hidden");
   try {
     const report = await invoke("repair_pack_index", { deviceMount, deviceId });
+    for (const notice of report.leftovers ?? []) {
+      log("err", `Import interrompu : ${notice}`);
+    }
     log("ok", isMacAppStoreChannel()
       ? `Index réparé nativement (${report.indexed} histoire(s)) — redémarre la boîte à histoires pour voir les histoires.`
       : `Index réparé (${report.indexed} histoire(s)) — redémarre la boîte à histoires pour voir les histoires.`);

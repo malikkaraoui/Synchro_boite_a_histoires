@@ -246,22 +246,29 @@ fn staging_dir_name(short_uuid: &str, suffix: &str) -> String {
     format!(".{short_uuid}{suffix}")
 }
 
-/// Nettoie les restes d'un import interrompu (crash, débranchement) :
+/// Nettoie les restes d'un import interrompu (crash, débranchement). Un dossier est jugé sur
+/// son **contenu** (`is_complete_story_dir`), jamais sur sa seule présence :
 /// - `.<SHORT>.tmp` : histoire jamais installée → supprimée ;
-/// - `.<SHORT>.old` avec `<SHORT>` présent : remplacement abouti → supprimée ;
-/// - `.<SHORT>.old` sans `<SHORT>` : interruption entre les deux renommages → restaurée.
+/// - `.<SHORT>.old` sans `<SHORT>` : interruption entre les deux renommages → restaurée ;
+/// - `.<SHORT>.old` avec `<SHORT>` complet : remplacement abouti → supprimée ;
+/// - `.<SHORT>.old` complet avec `<SHORT>` incomplet : retour arrière interrompu, `.old` est la
+///   seule copie saine → échangés (`.old` redevient `<SHORT>`, la copie incomplète passe en
+///   transit puis est retirée) ;
+/// - ni l'un ni l'autre complet : rien n'est supprimé, seulement signalé.
 ///
 /// Seuls les dossiers de cette forme exacte (8 hex) sont touchés : c'est ce que crée l'import.
-pub(crate) fn clean_import_leftovers(content_dir: &Path) -> Result<(), String> {
+/// Renvoie les signalements à montrer à l'utilisateur.
+pub(crate) fn clean_import_leftovers(content_dir: &Path) -> Result<Vec<String>, String> {
     let entries = fs::read_dir(content_dir)
         .map_err(|e| format!("Lecture de .content/ échouée : {e}"))?;
+    let mut previous = Vec::new();
     for entry in entries.filter_map(Result::ok) {
         if !entry.path().is_dir() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
         let Some(rest) = name.strip_prefix('.') else { continue };
-        let (short_uuid, previous) = if let Some(s) = rest.strip_suffix(STAGING_SUFFIX) {
+        let (short_uuid, is_previous) = if let Some(s) = rest.strip_suffix(STAGING_SUFFIX) {
             (s, false)
         } else if let Some(s) = rest.strip_suffix(PREVIOUS_SUFFIX) {
             (s, true)
@@ -271,17 +278,61 @@ pub(crate) fn clean_import_leftovers(content_dir: &Path) -> Result<(), String> {
         if short_uuid.len() != 8 || !short_uuid.chars().all(|c| c.is_ascii_hexdigit()) {
             continue;
         }
-        let path = entry.path();
-        let live = content_dir.join(short_uuid);
-        if previous && !live.exists() {
-            fs::rename(&path, &live)
-                .map_err(|e| format!("Restauration de {short_uuid} échouée : {e}"))?;
+        if is_previous {
+            previous.push(short_uuid.to_string());
         } else {
-            fs::remove_dir_all(&path)
+            // Les transits d'abord : l'échange ci-dessous réutilise leur nom.
+            fs::remove_dir_all(entry.path())
                 .map_err(|e| format!("Suppression de {name} échouée : {e}"))?;
         }
     }
-    Ok(())
+
+    let mut notices = Vec::new();
+    for short_uuid in previous {
+        let old = content_dir.join(staging_dir_name(&short_uuid, PREVIOUS_SUFFIX));
+        let live = content_dir.join(&short_uuid);
+        if !live.exists() {
+            fs::rename(&old, &live)
+                .map_err(|e| format!("Restauration de {short_uuid} échouée : {e}"))?;
+            notices.push(format!("{short_uuid} était resté de côté : l'histoire a été remise en place"));
+        } else if storybox_device::is_complete_story_dir(&live) {
+            fs::remove_dir_all(&old)
+                .map_err(|e| format!("Suppression de .{short_uuid}{PREVIOUS_SUFFIX} échouée : {e}"))?;
+        } else if live.is_dir() && storybox_device::is_complete_story_dir(&old) {
+            // Chaque étape laisse un état que ce même nettoyage sait reprendre.
+            let aside = content_dir.join(staging_dir_name(&short_uuid, STAGING_SUFFIX));
+            fs::rename(&live, &aside)
+                .map_err(|e| format!("Mise de côté de la copie incomplète de {short_uuid} échouée : {e}"))?;
+            fs::rename(&old, &live)
+                .map_err(|e| format!("Restauration de {short_uuid} échouée : {e}"))?;
+            fs::remove_dir_all(&aside)
+                .map_err(|e| format!("Suppression de la copie incomplète de {short_uuid} échouée : {e}"))?;
+            notices.push(format!(
+                "{short_uuid} était incomplet : la version précédente, complète, a été remise en place"
+            ));
+        } else {
+            notices.push(format!(
+                "ni {short_uuid} ni .{short_uuid}{PREVIOUS_SUFFIX} ne sont complets : laissés tels quels sur la boîte"
+            ));
+        }
+    }
+    Ok(notices)
+}
+
+/// « Réparer l'index » : termine d'abord un import interrompu (même nettoyage qu'avant un
+/// import), puis reconstruit l'index. Sans ce nettoyage, une histoire restée en `.<SHORT>.old`
+/// sortirait de `.pi` sans être signalée.
+pub fn repair_pack_index(mount: &str) -> Result<storybox_device::PackIndexRepair, String> {
+    let content_dir = Path::new(mount).join(".content");
+    let leftovers = if content_dir.is_dir() {
+        clean_import_leftovers(&content_dir)
+            .map_err(|e| format!("Nettoyage d'un import interrompu échoué : {e}. Index non modifié."))?
+    } else {
+        Vec::new()
+    };
+    let mut report = storybox_device::repair_pack_index_native(mount)?;
+    report.leftovers = leftovers;
+    Ok(report)
 }
 
 /// Écrit une histoire via `write` dans un dossier de transit, puis l'installe à la place
@@ -298,8 +349,11 @@ pub(crate) fn install_story(
     if !content_dir.is_dir() {
         return Err("Dossier .content introuvable sur la boîte".to_string());
     }
-    clean_import_leftovers(&content_dir)
+    let leftovers = clean_import_leftovers(&content_dir)
         .map_err(|e| format!("Nettoyage d'un import interrompu échoué : {e}. Rien n'a été écrit."))?;
+    for notice in &leftovers {
+        on_progress(&format!("⚠ Import interrompu : {notice}"));
+    }
 
     let story_dir = content_dir.join(short_uuid);
     let staging_dir = content_dir.join(staging_dir_name(short_uuid, STAGING_SUFFIX));
@@ -659,12 +713,21 @@ mod tests {
     /// Pack STUdio de la même histoire (même UUID), écrit hors montage.
     /// `image: false` : l'image manque, l'échec survient après l'écriture de l'audio.
     fn write_pack(dir: &Path, name: &str, audio: &[u8], image: bool) -> PathBuf {
+        write_pack_json(dir, name, STORY_JSON, audio, image)
+    }
+
+    /// Autre histoire (short UUID `CAFE0001`), même forme que `STORY_JSON`.
+    fn other_story_json() -> String {
+        STORY_JSON.replace("456789abcdef", "4567cafe0001")
+    }
+
+    fn write_pack_json(dir: &Path, name: &str, story_json: &str, audio: &[u8], image: bool) -> PathBuf {
         use std::io::Write;
         let zip_path = dir.join(name);
         let mut writer = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
         let opts = zip::write::SimpleFileOptions::default();
         writer.start_file("story.json", opts).unwrap();
-        writer.write_all(STORY_JSON.as_bytes()).unwrap();
+        writer.write_all(story_json.as_bytes()).unwrap();
         writer.start_file("assets/histoire.mp3", opts).unwrap();
         writer.write_all(audio).unwrap();
         if image {
@@ -785,8 +848,11 @@ mod tests {
         // Transit jamais installé
         fs::create_dir_all(content.join(".AABBCCDD.tmp/sf/000")).unwrap();
         fs::write(content.join(".AABBCCDD.tmp/ni"), b"partiel").unwrap();
-        // Remplacement abouti mais `.old` resté
+        // Remplacement abouti mais `.old` resté : la nouvelle histoire est complète
         fs::create_dir_all(content.join("11223344")).unwrap();
+        for f in ["li", "ri", "si", "bt"] {
+            fs::write(content.join("11223344").join(f), f.as_bytes()).unwrap();
+        }
         fs::write(content.join("11223344/ni"), b"nouvelle").unwrap();
         fs::create_dir_all(content.join(".11223344.old")).unwrap();
         fs::write(content.join(".11223344.old/ni"), b"ancienne").unwrap();
@@ -807,6 +873,158 @@ mod tests {
         assert!(content.join(".Spotlight-V100").is_dir());
         assert!(content.join(".CAFEBABE.tmp").is_file());
         assert!(content.join("89ABCDEF/bt").is_file());
+    }
+
+    // ── Récupération jugée sur le contenu (R003, R3-1) ───────────────────────
+
+    fn pi_short_uuids(mount: &Path) -> Vec<String> {
+        fs::read(mount.join(".pi"))
+            .unwrap_or_default()
+            .chunks(16)
+            .map(|c| hex::encode_upper(&c[12..]))
+            .collect()
+    }
+
+    fn import_logged(mount: &Path, zip_path: &Path) -> (Result<ImportResult, String>, Vec<String>) {
+        let log = std::cell::RefCell::new(Vec::new());
+        let res = import_story(mount.to_str().unwrap(), zip_path, "histoire", "sha256:abc", &|m| {
+            log.borrow_mut().push(m.to_string())
+        });
+        (res, log.into_inner())
+    }
+
+    #[cfg(unix)]
+    fn chmod(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// Faux sur un volume qui ignore les droits (FAT) ou pour root : le scénario A2 n'y est pas
+    /// reproductible.
+    #[cfg(unix)]
+    fn permissions_are_enforced(dir: &Path) -> bool {
+        let probe = dir.join("droits");
+        fs::create_dir_all(&probe).unwrap();
+        chmod(&probe, 0o555);
+        let enforced = fs::write(probe.join("x"), b"x").is_err();
+        chmod(&probe, 0o755);
+        fs::remove_dir_all(&probe).unwrap();
+        enforced
+    }
+
+    /// R003 A2 : l'index échoue après le remplacement ET le retrait de la nouvelle histoire
+    /// échoue à moitié. `.old` est alors la seule copie saine : l'import suivant d'une AUTRE
+    /// histoire doit la remettre en place, pas la supprimer.
+    #[cfg(unix)]
+    #[test]
+    fn double_failure_then_other_import_keeps_previous_story() {
+        let (mount, packs) = mount_with_imported_story(&md_v5());
+        let content = mount.path().join(".content");
+        if !permissions_are_enforced(mount.path()) {
+            eprintln!("A2 non reproductible ici (droits ignorés) : test sauté");
+            return;
+        }
+        let previous = snapshot(&content.join("89ABCDEF"));
+        fs::remove_file(mount.path().join(".pi.hidden")).unwrap();
+        fs::create_dir_all(mount.path().join(".pi.hidden")).unwrap();
+
+        let err = install_story(mount.path().to_str().unwrap(), "89ABCDEF", "histoire", "h", &|_| {}, |dir| {
+            for f in ["ni", "li", "ri", "si", "bt"] {
+                fs::write(dir.join(f), f.as_bytes()).map_err(|e| e.to_string())?;
+            }
+            fs::write(dir.join("sf/000/HISTOIRE"), b"nouvelle").map_err(|e| e.to_string())?;
+            chmod(&dir.join("sf/000"), 0o555);
+            Ok(())
+        })
+        .unwrap_err();
+        chmod(&content.join("89ABCDEF/sf/000"), 0o755);
+        assert!(err.contains("retrait de la nouvelle histoire échoué"), "{err}");
+        assert!(content.join(".89ABCDEF.old").is_dir(), "l'ancienne histoire est en .old");
+        assert!(
+            !crate::storybox_device::is_complete_story_dir(&content.join("89ABCDEF")),
+            "précondition A2 : la nouvelle histoire est à moitié retirée"
+        );
+
+        fs::remove_dir_all(mount.path().join(".pi.hidden")).unwrap();
+        let other = write_pack_json(packs.path(), "other.zip", &other_story_json(), &pattern(900, 5, 1), true);
+        let (res, log) = import_logged(mount.path(), &other);
+        assert_eq!(res.unwrap().short_uuid, "CAFE0001");
+
+        assert_eq!(snapshot(&content.join("89ABCDEF")), previous, "l'ancienne histoire est remise en place");
+        assert!(!content.join(".89ABCDEF.old").exists());
+        assert!(!content.join(".89ABCDEF.tmp").exists());
+        assert!(log.iter().any(|l| l.contains("89ABCDEF était incomplet")), "{log:?}");
+        let pi = pi_short_uuids(mount.path());
+        for short in ["89ABCDEF", "AABBCCDD", "CAFE0001"] {
+            assert!(pi.contains(&short.to_string()), "{short} indexé : {pi:?}");
+        }
+    }
+
+    /// Même état que A2, construit directement (tous volumes) : `<S>` incomplet, `.old` complet.
+    #[test]
+    fn cleanup_swaps_incomplete_story_with_complete_previous() {
+        let (mount, packs) = mount_with_imported_story(&md_v7());
+        let content = mount.path().join(".content");
+        let previous = snapshot(&content.join("89ABCDEF"));
+        fs::rename(content.join("89ABCDEF"), content.join(".89ABCDEF.old")).unwrap();
+        fs::create_dir_all(content.join("89ABCDEF/sf/000")).unwrap();
+        fs::write(content.join("89ABCDEF/li"), b"partiel").unwrap();
+
+        let other = write_pack_json(packs.path(), "other.zip", &other_story_json(), &pattern(900, 5, 1), true);
+        let (res, log) = import_logged(mount.path(), &other);
+        res.unwrap();
+
+        assert_eq!(snapshot(&content.join("89ABCDEF")), previous);
+        assert!(hidden_content_entries(mount.path()).is_empty(), "ni .tmp ni .old ne restent");
+        assert!(log.iter().any(|l| l.contains("89ABCDEF était incomplet")), "{log:?}");
+    }
+
+    /// Ni `<S>` ni `.old` complets : rien n'est supprimé, c'est signalé ; un réimport de `<S>`
+    /// échoue alors sans rien modifier.
+    #[test]
+    fn cleanup_never_deletes_when_neither_copy_is_complete() {
+        let (mount, packs) = mount_with_imported_story(&md_v7());
+        let content = mount.path().join(".content");
+        fs::create_dir_all(content.join(".89ABCDEF.old")).unwrap();
+        fs::write(content.join(".89ABCDEF.old/ni"), b"ancienne, partielle").unwrap();
+        fs::remove_file(content.join("89ABCDEF/bt")).unwrap();
+        let old_copy = snapshot(&content.join(".89ABCDEF.old"));
+        let live_copy = snapshot(&content.join("89ABCDEF"));
+
+        let other = write_pack_json(packs.path(), "other.zip", &other_story_json(), &pattern(900, 5, 1), true);
+        let (res, log) = import_logged(mount.path(), &other);
+        res.unwrap();
+        assert!(content.join(".89ABCDEF.old").is_dir(), "aucune copie n'est supprimée");
+        assert_eq!(snapshot(&content.join(".89ABCDEF.old")), old_copy);
+        assert_eq!(snapshot(&content.join("89ABCDEF")), live_copy);
+        assert!(log.iter().any(|l| l.contains("ni 89ABCDEF ni .89ABCDEF.old ne sont complets")), "{log:?}");
+
+        let before = snapshot(mount.path());
+        let same = write_pack(packs.path(), "same.zip", &pattern(1000, 7, 3), true);
+        let err = import(mount.path(), &same).unwrap_err();
+        assert!(err.contains("Mise de côté"), "{err}");
+        assert_eq!(snapshot(mount.path()), before, "boîte identique");
+    }
+
+    /// R003 A3 : coupure entre `<S>` → `.old` et `.tmp` → `<S>`, puis « Réparer l'index » (le
+    /// geste que l'UI recommande). L'histoire est remise en place, garde sa position dans `.pi`,
+    /// et c'est signalé.
+    #[test]
+    fn repair_after_interrupted_rename_keeps_story_indexed() {
+        let (mount, _packs) = mount_with_imported_story(&md_v5());
+        let content = mount.path().join(".content");
+        let order = pi_short_uuids(mount.path());
+        assert!(order.contains(&"89ABCDEF".to_string()));
+        fs::rename(content.join("89ABCDEF"), content.join(".89ABCDEF.old")).unwrap();
+
+        let report = repair_pack_index(mount.path().to_str().unwrap()).unwrap();
+
+        assert_eq!(pi_short_uuids(mount.path()), order, "même index, même ordre");
+        assert!(content.join("89ABCDEF/bt").is_file());
+        assert!(!content.join(".89ABCDEF.old").exists());
+        assert!(report.incomplete.is_empty(), "{:?}", report.incomplete);
+        assert_eq!(report.leftovers.len(), 1, "{:?}", report.leftovers);
+        assert!(report.leftovers[0].starts_with("89ABCDEF"), "{:?}", report.leftovers);
     }
 
     #[test]
